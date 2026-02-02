@@ -5,13 +5,18 @@ import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
-import { ResponsiveContainer } from 'recharts'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Loader2 } from 'lucide-react'
+import type { OnlineKPIsResponse } from '@/lib/api'
+import { Skeleton } from '@/components/ui/skeleton'
 
-export default function OnlineKPIsPage() {
-  const isPdfMode = false
-  const { kpis: kpisData } = useKPIs()
+export interface OnlineKPIsClientProps {
+  isPdfMode?: boolean
+  dataOverride?: OnlineKPIsResponse | null
+}
+
+export default function OnlineKPIsClient({ isPdfMode = false, dataOverride }: OnlineKPIsClientProps) {
+  const { kpis: contextKpis } = useKPIs()
+  const kpisData = dataOverride ?? contextKpis
   const chartAnimationsEnabled = useChartAnimations()
   // Disable animations in PDF mode
   const isAnimationActive = !isPdfMode && chartAnimationsEnabled
@@ -25,7 +30,7 @@ export default function OnlineKPIsPage() {
     { key: 'conversion_rate', label: 'Conversion Rate', format: (val: number) => val.toFixed(1) + '%' },
     { key: 'new_customers', label: 'New Customers', format: (val: number) => val.toLocaleString() },
     { key: 'returning_customers', label: 'Returning Customers', format: (val: number) => val.toLocaleString() },
-    { key: 'new_customer_cac', label: 'New Customer CAC', format: (val: number) => Math.round(val).toString() }
+    { key: 'new_customer_cac', label: 'New Customer CAC', format: (val: number) => Math.round(val).toString() },
   ]
 
   // Normalize kpis structure - handle both { kpis: [...] } and direct array
@@ -34,13 +39,31 @@ export default function OnlineKPIsPage() {
     if (Array.isArray(kpisData)) {
       // Structure: direct array
       kpis = kpisData
-    } else if (kpisData.kpis && Array.isArray(kpisData.kpis)) {
-      // Structure: { kpis: [...] }
-      kpis = kpisData.kpis
-    } else if (typeof kpisData === 'object') {
-      // Structure: { kpis: {...} } - might be an object instead of array
-      kpis = Object.values(kpisData.kpis || {}) as any[]
+    } else if (kpisData && typeof kpisData === 'object' && 'kpis' in kpisData) {
+      // Structure: { kpis: [...] } - this is the expected OnlineKPIsResponse structure
+      if (Array.isArray((kpisData as any).kpis)) {
+        kpis = (kpisData as any).kpis
+      } else if (typeof (kpisData as any).kpis === 'object' && (kpisData as any).kpis !== null) {
+        // Structure: { kpis: {...} } - might be an object instead of array
+        kpis = Object.values((kpisData as any).kpis) as any[]
+      }
     }
+  }
+
+  // Debug logging (remove in production)
+  if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+    // eslint-disable-next-line no-console
+    console.log('[OnlineKPIs] kpisData:', kpisData)
+    // eslint-disable-next-line no-console
+    console.log('[OnlineKPIs] kpisData type:', typeof kpisData)
+    // eslint-disable-next-line no-console
+    console.log('[OnlineKPIs] kpisData is array:', Array.isArray(kpisData))
+    // eslint-disable-next-line no-console
+    console.log('[OnlineKPIs] kpisData.kpis:', kpisData && typeof kpisData === 'object' ? (kpisData as any).kpis : 'N/A')
+    // eslint-disable-next-line no-console
+    console.log('[OnlineKPIs] normalized kpis:', kpis)
+    // eslint-disable-next-line no-console
+    console.log('[OnlineKPIs] kpis length:', kpis.length)
   }
 
   if (!kpisData || kpis.length === 0) {
@@ -53,7 +76,7 @@ export default function OnlineKPIsPage() {
             <p className="text-sm text-gray-600">Processing data from Qlik, DEMA, and Shopify...</p>
           </div>
         </div>
-        
+
         <div className="grid grid-cols-3 gap-6">
           {kpiLabels.map((kpi, index) => (
             <Card key={index}>
@@ -75,26 +98,28 @@ export default function OnlineKPIsPage() {
       <div className={`grid ${isPdfMode ? 'grid-cols-3 gap-2' : 'grid-cols-3 gap-6'}`}>
         {kpiLabels.map((kpi, index) => {
           // Data comes in correct order W35->W42 from backend
-          const chartData = kpis.map(k => {
-            const weekNum = k.week.split('-')[1]
-            const currentValue = k[kpi.key as keyof typeof k] as number
-            const lastYearValue = k.last_year?.[kpi.key as keyof typeof k.last_year] as number || 0
-            
-            return {
-              week: `W${weekNum}`,
-              current: currentValue,
-              lastYear: lastYearValue
-            }
-          })
+          const chartData = kpis
+            .filter((k) => k && k.week) // Filter out null/undefined entries
+            .map((k) => {
+              const weekNum = k.week.split('-')[1]
+              const currentValue = k[kpi.key as keyof typeof k] as number
+              const lastYearValue = (k.last_year?.[kpi.key as keyof typeof k.last_year] as number) || 0
+
+              return {
+                week: `W${weekNum}`,
+                current: currentValue,
+                lastYear: lastYearValue,
+              }
+            })
 
           const chartConfig = {
             current: {
-              label: "Current Year",
-              color: "#4B5563", // Dark gray
+              label: 'Current Year',
+              color: '#4B5563', // Dark gray
             },
             lastYear: {
-              label: "Last Year",
-              color: "#F97316", // Orange
+              label: 'Last Year',
+              color: '#F97316', // Orange
             },
           } satisfies ChartConfig
 
@@ -106,10 +131,7 @@ export default function OnlineKPIsPage() {
               <CardContent className={isPdfMode ? 'p-2 pt-1' : ''}>
                 {isPdfMode ? (
                   <div className="w-full h-[150px]">
-                    <ChartContainer 
-                      config={chartConfig}
-                      className="w-full h-full"
-                    >
+                    <ChartContainer config={chartConfig} className="w-full h-full">
                       <LineChart
                         width={600}
                         height={150}
@@ -120,7 +142,6 @@ export default function OnlineKPIsPage() {
                           right: 5,
                           bottom: 5,
                         }}
-                        isAnimationActive={isAnimationActive}
                       >
                         <CartesianGrid vertical={false} />
                         <XAxis
@@ -130,10 +151,7 @@ export default function OnlineKPIsPage() {
                           tickMargin={8}
                           tickFormatter={(value) => value.replace('W', '')}
                         />
-                        <ChartTooltip
-                          cursor={false}
-                          content={<ChartTooltipContent indicator="line" />}
-                        />
+                        <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="line" />} />
                         <Line
                           dataKey="current"
                           type="natural"
@@ -163,9 +181,7 @@ export default function OnlineKPIsPage() {
                     </ChartContainer>
                   </div>
                 ) : (
-                  <ChartContainer 
-                    config={chartConfig}
-                  >
+                  <ChartContainer config={chartConfig}>
                     <LineChart
                       accessibilityLayer
                       data={chartData}
@@ -174,7 +190,6 @@ export default function OnlineKPIsPage() {
                         left: 12,
                         right: 12,
                       }}
-                      isAnimationActive={isAnimationActive}
                     >
                       <CartesianGrid vertical={false} />
                       <XAxis
@@ -184,10 +199,7 @@ export default function OnlineKPIsPage() {
                         tickMargin={8}
                         tickFormatter={(value) => value.replace('W', '')}
                       />
-                      <ChartTooltip
-                        cursor={false}
-                        content={<ChartTooltipContent indicator="line" />}
-                      />
+                      <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="line" />} />
                       <Line
                         dataKey="current"
                         type="natural"
@@ -224,3 +236,5 @@ export default function OnlineKPIsPage() {
     </div>
   )
 }
+
+

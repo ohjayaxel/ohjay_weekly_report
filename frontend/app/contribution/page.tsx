@@ -1,6 +1,7 @@
 'use client'
 
 import { useContribution } from '@/contexts/DataCacheContext'
+import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
@@ -9,6 +10,7 @@ import { Loader2 } from 'lucide-react'
 
 export default function Contribution() {
   const { contributions } = useContribution()
+  const isAnimationActive = useChartAnimations()
 
   const contributionLabels = [
     { key: 'gross_revenue_new', label: 'Gross Revenue New Customer', format: (val: number) => Math.round(val / 1000).toString() },
@@ -29,7 +31,22 @@ export default function Contribution() {
     contributionLabels[3], // Total Returning Customer Contribution
   ]
 
-  if (!contributions) {
+  // Normalize contributions structure - handle both { contributions: [...] } and direct array
+  let contributionData: any[] = []
+  if (contributions) {
+    if (Array.isArray(contributions)) {
+      // Structure: direct array
+      contributionData = contributions
+    } else if (contributions.contributions && Array.isArray(contributions.contributions)) {
+      // Structure: { contributions: [...] }
+      contributionData = contributions.contributions
+    } else if (typeof contributions === 'object') {
+      // Structure: { contributions: {...} } - might be an object instead of array
+      contributionData = Object.values(contributions.contributions || {}) as any[]
+    }
+  }
+
+  if (!contributions || contributionData.length === 0) {
     return (
       <div className="space-y-8">
         <div className="flex items-center gap-3 mb-6">
@@ -61,7 +78,7 @@ export default function Contribution() {
       {/* First row: Top 3 graphs */}
       <div className="grid grid-cols-3 gap-6">
         {layoutOrder.slice(0, 3).map((label, index) => {
-          const chartData = contributions.contributions.map(k => {
+          const chartData = contributionData.map(k => {
             const weekNum = k.week.split('-')[1]
             const currentValue = k[label.key as keyof typeof k] as number
             const lastYearValue = k.last_year?.[label.key as keyof typeof k.last_year] as number || 0
@@ -99,6 +116,7 @@ export default function Contribution() {
                       left: 12,
                       right: 12,
                     }}
+                    isAnimationActive={isAnimationActive}
                   >
                     <CartesianGrid vertical={false} />
                     <XAxis
@@ -117,13 +135,15 @@ export default function Contribution() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => label.format(value)}
+                        formatter={(val: unknown) => label.format(Number(val ?? 0))}
                       />
                     </Line>
                     <Line
@@ -132,6 +152,8 @@ export default function Contribution() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>
@@ -144,7 +166,7 @@ export default function Contribution() {
       {/* Second row: Bottom 2 graphs, centered */}
       <div className="grid grid-cols-3 gap-6">
         {layoutOrder.slice(3).map((label, index) => {
-          const chartData = contributions.contributions.map(k => {
+          const chartData = contributionData.map(k => {
             const weekNum = k.week.split('-')[1]
             const currentValue = k[label.key as keyof typeof k] as number
             const lastYearValue = k.last_year?.[label.key as keyof typeof k.last_year] as number || 0
@@ -182,6 +204,7 @@ export default function Contribution() {
                       left: 12,
                       right: 12,
                     }}
+                    isAnimationActive={isAnimationActive}
                   >
                     <CartesianGrid vertical={false} />
                     <XAxis
@@ -200,13 +223,15 @@ export default function Contribution() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => label.format(value)}
+                        formatter={(val: unknown) => label.format(Number(val ?? 0))}
                       />
                     </Line>
                     <Line
@@ -215,6 +240,8 @@ export default function Contribution() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>

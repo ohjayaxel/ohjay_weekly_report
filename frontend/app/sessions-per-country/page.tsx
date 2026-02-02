@@ -1,6 +1,7 @@
 'use client'
 
 import { useSessionsPerCountry } from '@/contexts/DataCacheContext'
+import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
@@ -9,6 +10,7 @@ import { Loader2 } from 'lucide-react'
 
 export default function SessionsPerCountry() {
   const { sessions_per_country } = useSessionsPerCountry()
+  const isAnimationActive = useChartAnimations()
 
   // Define country order and labels
   const countryOrder = [
@@ -28,7 +30,22 @@ export default function SessionsPerCountry() {
     return (value / 1000).toFixed(1)
   }
 
-  if (!sessions_per_country) {
+  // Normalize sessions_per_country structure - handle both { sessions_per_country: [...] } and direct array
+  let sessionsData: any[] = []
+  if (sessions_per_country) {
+    if (Array.isArray(sessions_per_country)) {
+      // Structure: direct array
+      sessionsData = sessions_per_country
+    } else if (sessions_per_country.sessions_per_country && Array.isArray(sessions_per_country.sessions_per_country)) {
+      // Structure: { sessions_per_country: [...] }
+      sessionsData = sessions_per_country.sessions_per_country
+    } else if (typeof sessions_per_country === 'object') {
+      // Structure: { sessions_per_country: {...} } - might be an object instead of array
+      sessionsData = Object.values(sessions_per_country.sessions_per_country || {}) as any[]
+    }
+  }
+
+  if (!sessions_per_country || sessionsData.length === 0) {
     return (
       <div className="space-y-8">
         <div className="flex items-center gap-3 mb-6">
@@ -59,39 +76,43 @@ export default function SessionsPerCountry() {
     <div className="space-y-8">
       <div className="grid grid-cols-3 gap-6">
         {countryOrder.map((country, index) => {
-          const chartData = sessions_per_country.sessions_per_country.map((week: any) => {
+          const chartData = sessionsData.map((week: any) => {
             const weekNum = week.week.split('-')[1]
             let currentValue = 0
             let lastYearValue = 0
 
             if (country.key === 'Total') {
               // Calculate total sessions across all countries
-              currentValue = Object.values(week.countries).reduce((sum: number, val: any) => sum + val, 0)
-              if (week.last_year) {
-                lastYearValue = Object.values(week.last_year.countries).reduce((sum: number, val: any) => sum + val, 0)
+              currentValue = (week.countries && typeof week.countries === 'object') 
+                ? Object.values(week.countries).reduce((sum: number, val: any) => sum + (Number(val) || 0), 0)
+                : 0
+              if (week.last_year && week.last_year.countries && typeof week.last_year.countries === 'object') {
+                lastYearValue = Object.values(week.last_year.countries).reduce((sum: number, val: any) => sum + (Number(val) || 0), 0)
               }
             } else if (country.key === 'ROW') {
               // Calculate ROW (Rest of World) - all countries except the main ones
               const mainCountries = ['United States', 'United Kingdom', 'Sweden', 'Germany', 'Australia', 'Canada', 'France']
-              currentValue = Object.entries(week.countries).reduce((sum: number, [countryName, sessions]: [string, any]) => {
-                if (!mainCountries.includes(countryName)) {
-                  return sum + sessions
-                }
-                return sum
-              }, 0)
-              if (week.last_year) {
+              currentValue = (week.countries && typeof week.countries === 'object')
+                ? Object.entries(week.countries).reduce((sum: number, [countryName, sessions]: [string, any]) => {
+                    if (!mainCountries.includes(countryName)) {
+                      return sum + (Number(sessions) || 0)
+                    }
+                    return sum
+                  }, 0)
+                : 0
+              if (week.last_year && week.last_year.countries && typeof week.last_year.countries === 'object') {
                 lastYearValue = Object.entries(week.last_year.countries).reduce((sum: number, [countryName, sessions]: [string, any]) => {
                   if (!mainCountries.includes(countryName)) {
-                    return sum + sessions
+                    return sum + (Number(sessions) || 0)
                   }
                   return sum
                 }, 0)
               }
             } else {
               // Specific country
-              currentValue = week.countries[country.key] || 0
-              if (week.last_year) {
-                lastYearValue = week.last_year.countries[country.key] || 0
+              currentValue = (week.countries && week.countries[country.key]) ? Number(week.countries[country.key]) || 0 : 0
+              if (week.last_year && week.last_year.countries && week.last_year.countries[country.key]) {
+                lastYearValue = Number(week.last_year.countries[country.key]) || 0
               }
             }
             
@@ -128,6 +149,7 @@ export default function SessionsPerCountry() {
                       left: 12,
                       right: 12,
                     }}
+                    isAnimationActive={isAnimationActive}
                   >
                     <CartesianGrid vertical={false} />
                     <XAxis
@@ -146,13 +168,15 @@ export default function SessionsPerCountry() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => formatValue(value)}
+                        formatter={(label: unknown) => formatValue(Number(label ?? 0))}
                       />
                     </Line>
                     <Line
@@ -161,6 +185,8 @@ export default function SessionsPerCountry() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>

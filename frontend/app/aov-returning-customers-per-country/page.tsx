@@ -1,6 +1,7 @@
 'use client'
 
 import { useDataCache } from '@/contexts/DataCacheContext'
+import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
@@ -9,6 +10,7 @@ import { Loader2 } from 'lucide-react'
 
 export default function AOVReturningCustomersPerCountry() {
   const { aov_returning_customers_per_country } = useDataCache()
+  const isAnimationActive = useChartAnimations()
 
   // Define country order and labels
   const countryOrder = [
@@ -28,7 +30,22 @@ export default function AOVReturningCustomersPerCountry() {
     return Math.round(value).toString()
   }
 
-  if (!aov_returning_customers_per_country) {
+  // Normalize aov_returning_customers_per_country structure - handle both { aov_returning_customers_per_country: [...] } and direct array
+  let aovData: any[] = []
+  if (aov_returning_customers_per_country) {
+    if (Array.isArray(aov_returning_customers_per_country)) {
+      // Structure: direct array
+      aovData = aov_returning_customers_per_country
+    } else if (aov_returning_customers_per_country.aov_returning_customers_per_country && Array.isArray(aov_returning_customers_per_country.aov_returning_customers_per_country)) {
+      // Structure: { aov_returning_customers_per_country: [...] }
+      aovData = aov_returning_customers_per_country.aov_returning_customers_per_country
+    } else if (typeof aov_returning_customers_per_country === 'object') {
+      // Structure: { aov_returning_customers_per_country: {...} } - might be an object instead of array
+      aovData = Object.values(aov_returning_customers_per_country.aov_returning_customers_per_country || {}) as any[]
+    }
+  }
+
+  if (!aov_returning_customers_per_country || aovData.length === 0) {
     return (
       <div className="space-y-8">
         <div className="flex items-center gap-3 mb-6">
@@ -59,30 +76,34 @@ export default function AOVReturningCustomersPerCountry() {
     <div className="space-y-8">
       <div className="grid grid-cols-3 gap-6">
         {countryOrder.map((country, index) => {
-          const chartData = aov_returning_customers_per_country.aov_returning_customers_per_country.map((week: any) => {
+          const chartData = aovData.map((week: any) => {
             const weekNum = week.week.split('-')[1]
             let currentValue = 0
             let lastYearValue = 0
 
             if (country.key === 'Total') {
               // Use Total AOV from backend (already calculated correctly)
-              currentValue = week.countries['Total'] || 0
-              if (week.last_year) {
-                lastYearValue = week.last_year.countries['Total'] || 0
+              if (week.countries && week.countries['Total']) {
+                currentValue = Number(week.countries['Total']) || 0
+              }
+              if (week.last_year && week.last_year.countries && week.last_year.countries['Total']) {
+                lastYearValue = Number(week.last_year.countries['Total']) || 0
               }
             } else if (country.key === 'ROW') {
-              // ROW should NOT be included in countries dict since it's not a real country
-              // We need to extract it from the data structure if it exists
-              // Check if 'ROW' exists as a key in the countries dict
-              currentValue = week.countries['ROW'] || 0
-              if (week.last_year) {
-                lastYearValue = week.last_year.countries['ROW'] || 0
+              // Use ROW AOV from backend (already calculated correctly)
+              if (week.countries && week.countries['ROW']) {
+                currentValue = Number(week.countries['ROW']) || 0
+              }
+              if (week.last_year && week.last_year.countries && week.last_year.countries['ROW']) {
+                lastYearValue = Number(week.last_year.countries['ROW']) || 0
               }
             } else {
               // Specific country
-              currentValue = week.countries[country.key] || 0
-              if (week.last_year) {
-                lastYearValue = week.last_year.countries[country.key] || 0
+              if (week.countries && week.countries[country.key]) {
+                currentValue = Number(week.countries[country.key]) || 0
+              }
+              if (week.last_year && week.last_year.countries && week.last_year.countries[country.key]) {
+                lastYearValue = Number(week.last_year.countries[country.key]) || 0
               }
             }
             
@@ -137,13 +158,15 @@ export default function AOVReturningCustomersPerCountry() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => formatValue(value)}
+                        formatter={(label: unknown) => formatValue(Number(label ?? 0))}
                       />
                     </Line>
                     <Line
@@ -152,6 +175,8 @@ export default function AOVReturningCustomersPerCountry() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>

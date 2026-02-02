@@ -1,6 +1,7 @@
 'use client'
 
 import { useConversionPerCountry } from '@/contexts/DataCacheContext'
+import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
@@ -9,6 +10,7 @@ import { Loader2 } from 'lucide-react'
 
 export default function ConversionPerCountry() {
   const { conversion_per_country } = useConversionPerCountry()
+  const isAnimationActive = useChartAnimations()
 
   // Define country order and labels
   const countryOrder = [
@@ -28,7 +30,22 @@ export default function ConversionPerCountry() {
     return value.toFixed(1) + '%'
   }
 
-  if (!conversion_per_country) {
+  // Normalize conversion_per_country structure - handle both { conversion_per_country: [...] } and direct array
+  let conversionData: any[] = []
+  if (conversion_per_country) {
+    if (Array.isArray(conversion_per_country)) {
+      // Structure: direct array
+      conversionData = conversion_per_country
+    } else if (conversion_per_country.conversion_per_country && Array.isArray(conversion_per_country.conversion_per_country)) {
+      // Structure: { conversion_per_country: [...] }
+      conversionData = conversion_per_country.conversion_per_country
+    } else if (typeof conversion_per_country === 'object') {
+      // Structure: { conversion_per_country: {...} } - might be an object instead of array
+      conversionData = Object.values(conversion_per_country.conversion_per_country || {}) as any[]
+    }
+  }
+
+  if (!conversion_per_country || conversionData.length === 0) {
     return (
       <div className="space-y-8">
         <div className="flex items-center gap-3 mb-6">
@@ -59,20 +76,34 @@ export default function ConversionPerCountry() {
     <div className="space-y-8">
       <div className="grid grid-cols-3 gap-6">
         {countryOrder.map((country, index) => {
-          const chartData = conversion_per_country.conversion_per_country.map((week: any) => {
+          const chartData = conversionData.map((week: any) => {
             const weekNum = week.week.split('-')[1]
             let currentValue = 0
             let lastYearValue = 0
 
             if (country.key === 'Total') {
               // Calculate total conversion rate across all countries
-              const totalOrders = Object.values(week.countries).reduce((sum: number, val: any) => sum + (val.orders || 0), 0)
-              const totalSessions = Object.values(week.countries).reduce((sum: number, val: any) => sum + (val.sessions || 0), 0)
-              currentValue = totalSessions > 0 ? (totalOrders / totalSessions) * 100 : 0
+              if (week.countries && typeof week.countries === 'object') {
+                const totalOrders = Object.values(week.countries).reduce((sum: number, val: any) => {
+                  const orders = (val && typeof val === 'object' && val.orders) ? Number(val.orders) || 0 : 0
+                  return sum + orders
+                }, 0)
+                const totalSessions = Object.values(week.countries).reduce((sum: number, val: any) => {
+                  const sessions = (val && typeof val === 'object' && val.sessions) ? Number(val.sessions) || 0 : 0
+                  return sum + sessions
+                }, 0)
+                currentValue = totalSessions > 0 ? (totalOrders / totalSessions) * 100 : 0
+              }
               
-              if (week.last_year) {
-                const totalOrdersLY = Object.values(week.last_year.countries).reduce((sum: number, val: any) => sum + (val.orders || 0), 0)
-                const totalSessionsLY = Object.values(week.last_year.countries).reduce((sum: number, val: any) => sum + (val.sessions || 0), 0)
+              if (week.last_year && week.last_year.countries && typeof week.last_year.countries === 'object') {
+                const totalOrdersLY = Object.values(week.last_year.countries).reduce((sum: number, val: any) => {
+                  const orders = (val && typeof val === 'object' && val.orders) ? Number(val.orders) || 0 : 0
+                  return sum + orders
+                }, 0)
+                const totalSessionsLY = Object.values(week.last_year.countries).reduce((sum: number, val: any) => {
+                  const sessions = (val && typeof val === 'object' && val.sessions) ? Number(val.sessions) || 0 : 0
+                  return sum + sessions
+                }, 0)
                 lastYearValue = totalSessionsLY > 0 ? (totalOrdersLY / totalSessionsLY) * 100 : 0
               }
             } else if (country.key === 'ROW') {
@@ -81,33 +112,45 @@ export default function ConversionPerCountry() {
               let totalOrders = 0
               let totalSessions = 0
               
-              Object.entries(week.countries).forEach(([countryName, data]: [string, any]) => {
-                if (!mainCountries.includes(countryName)) {
-                  totalOrders += data.orders || 0
-                  totalSessions += data.sessions || 0
-                }
-              })
+              if (week.countries && typeof week.countries === 'object') {
+                Object.entries(week.countries).forEach(([countryName, data]: [string, any]) => {
+                  if (!mainCountries.includes(countryName)) {
+                    if (data && typeof data === 'object') {
+                      totalOrders += Number(data.orders) || 0
+                      totalSessions += Number(data.sessions) || 0
+                    }
+                  }
+                })
+              }
               currentValue = totalSessions > 0 ? (totalOrders / totalSessions) * 100 : 0
               
-              if (week.last_year) {
+              if (week.last_year && week.last_year.countries && typeof week.last_year.countries === 'object') {
                 let totalOrdersLY = 0
                 let totalSessionsLY = 0
                 Object.entries(week.last_year.countries).forEach(([countryName, data]: [string, any]) => {
                   if (!mainCountries.includes(countryName)) {
-                    totalOrdersLY += data.orders || 0
-                    totalSessionsLY += data.sessions || 0
+                    if (data && typeof data === 'object') {
+                      totalOrdersLY += Number(data.orders) || 0
+                      totalSessionsLY += Number(data.sessions) || 0
+                    }
                   }
                 })
                 lastYearValue = totalSessionsLY > 0 ? (totalOrdersLY / totalSessionsLY) * 100 : 0
               }
             } else {
               // Specific country
-              const countryData = week.countries[country.key] || { conversion_rate: 0, orders: 0, sessions: 0 }
-              currentValue = countryData.conversion_rate || 0
+              if (week.countries && week.countries[country.key]) {
+                const countryData = week.countries[country.key]
+                if (countryData && typeof countryData === 'object') {
+                  currentValue = Number(countryData.conversion_rate) || 0
+                }
+              }
               
-              if (week.last_year) {
-                const countryDataLY = week.last_year.countries[country.key] || { conversion_rate: 0 }
-                lastYearValue = countryDataLY.conversion_rate || 0
+              if (week.last_year && week.last_year.countries && week.last_year.countries[country.key]) {
+                const countryDataLY = week.last_year.countries[country.key]
+                if (countryDataLY && typeof countryDataLY === 'object') {
+                  lastYearValue = Number(countryDataLY.conversion_rate) || 0
+                }
               }
             }
             
@@ -144,6 +187,7 @@ export default function ConversionPerCountry() {
                       left: 12,
                       right: 12,
                     }}
+                    isAnimationActive={isAnimationActive}
                   >
                     <CartesianGrid vertical={false} />
                     <XAxis
@@ -162,13 +206,15 @@ export default function ConversionPerCountry() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => formatValue(value)}
+                        formatter={(label: unknown) => formatValue(Number(label ?? 0))}
                       />
                     </Line>
                     <Line
@@ -177,6 +223,8 @@ export default function ConversionPerCountry() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>

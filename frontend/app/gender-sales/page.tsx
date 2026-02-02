@@ -1,6 +1,7 @@
 'use client'
 
 import { useGenderSales } from '@/contexts/DataCacheContext'
+import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
@@ -9,13 +10,29 @@ import { Loader2 } from 'lucide-react'
 
 export default function GenderSales() {
   const { gender_sales } = useGenderSales()
+  const isAnimationActive = useChartAnimations()
 
   const genderLabels = [
     { key: 'men_unisex_sales', label: 'Gross Sales Men', format: (val: number) => Math.round(val / 1000).toString() },
     { key: 'women_sales', label: 'Gross Sales Womens', format: (val: number) => Math.round(val / 1000).toString() },
   ]
 
-  if (!gender_sales) {
+  // Normalize gender_sales structure - handle both { gender_sales: [...] } and direct array
+  let genderData: any[] = []
+  if (gender_sales) {
+    if (Array.isArray(gender_sales)) {
+      // Structure: direct array
+      genderData = gender_sales
+    } else if (gender_sales.gender_sales && Array.isArray(gender_sales.gender_sales)) {
+      // Structure: { gender_sales: [...] }
+      genderData = gender_sales.gender_sales
+    } else if (typeof gender_sales === 'object') {
+      // Structure: { gender_sales: {...} } - might be an object instead of array
+      genderData = Object.values(gender_sales.gender_sales || {}) as any[]
+    }
+  }
+
+  if (!gender_sales || genderData.length === 0) {
     return (
       <div className="space-y-8">
         <div className="flex items-center gap-3 mb-6">
@@ -46,7 +63,7 @@ export default function GenderSales() {
     <div className="space-y-8">
       <div className="grid grid-cols-2 gap-6">
         {genderLabels.map((label, index) => {
-          const chartData = gender_sales.gender_sales.map(g => {
+          const chartData = genderData.map(g => {
             const weekNum = g.week.split('-')[1]
             const currentValue = g[label.key as keyof typeof g] as number
             const lastYearValue = g.last_year?.[label.key as keyof typeof g.last_year] as number || 0
@@ -84,6 +101,7 @@ export default function GenderSales() {
                       left: 12,
                       right: 12,
                     }}
+                    isAnimationActive={isAnimationActive}
                   >
                     <CartesianGrid vertical={false} />
                     <XAxis
@@ -102,13 +120,15 @@ export default function GenderSales() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => label.format(value)}
+                        formatter={(val: unknown) => label.format(Number(val ?? 0))}
                       />
                     </Line>
                     <Line
@@ -117,6 +137,8 @@ export default function GenderSales() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>

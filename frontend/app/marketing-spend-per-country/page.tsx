@@ -1,6 +1,7 @@
 'use client'
 
 import { useMarketingSpendPerCountry } from '@/contexts/DataCacheContext'
+import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
@@ -9,6 +10,7 @@ import { Loader2 } from 'lucide-react'
 
 export default function MarketingSpendPerCountry() {
   const { marketing_spend_per_country } = useMarketingSpendPerCountry()
+  const isAnimationActive = useChartAnimations()
 
   // Define country order and labels
   const countryOrder = [
@@ -28,7 +30,22 @@ export default function MarketingSpendPerCountry() {
     return Math.round(value / 1000).toString() + 'k'
   }
 
-  if (!marketing_spend_per_country) {
+  // Normalize marketing_spend_per_country structure - handle both { marketing_spend_per_country: [...] } and direct array
+  let marketingData: any[] = []
+  if (marketing_spend_per_country) {
+    if (Array.isArray(marketing_spend_per_country)) {
+      // Structure: direct array
+      marketingData = marketing_spend_per_country
+    } else if (marketing_spend_per_country.marketing_spend_per_country && Array.isArray(marketing_spend_per_country.marketing_spend_per_country)) {
+      // Structure: { marketing_spend_per_country: [...] }
+      marketingData = marketing_spend_per_country.marketing_spend_per_country
+    } else if (typeof marketing_spend_per_country === 'object') {
+      // Structure: { marketing_spend_per_country: {...} } - might be an object instead of array
+      marketingData = Object.values(marketing_spend_per_country.marketing_spend_per_country || {}) as any[]
+    }
+  }
+
+  if (!marketing_spend_per_country || marketingData.length === 0) {
     return (
       <div className="space-y-8">
         <div className="flex items-center gap-3 mb-6">
@@ -59,39 +76,45 @@ export default function MarketingSpendPerCountry() {
     <div className="space-y-8">
       <div className="grid grid-cols-3 gap-6">
         {countryOrder.map((country, index) => {
-          const chartData = marketing_spend_per_country.marketing_spend_per_country.map((week: any) => {
+          const chartData = marketingData.map((week: any) => {
             const weekNum = week.week.split('-')[1]
             let currentValue = 0
             let lastYearValue = 0
 
             if (country.key === 'Total') {
-              // Calculate total new customers across all countries
-              currentValue = Object.values(week.countries).reduce((sum: number, val: any) => sum + val, 0)
-              if (week.last_year) {
-                lastYearValue = Object.values(week.last_year.countries).reduce((sum: number, val: any) => sum + val, 0)
+              // Calculate total marketing spend across all countries
+              if (week.countries && typeof week.countries === 'object') {
+                currentValue = Object.values(week.countries).reduce((sum: number, val: any) => sum + (Number(val) || 0), 0)
+              }
+              if (week.last_year && week.last_year.countries && typeof week.last_year.countries === 'object') {
+                lastYearValue = Object.values(week.last_year.countries).reduce((sum: number, val: any) => sum + (Number(val) || 0), 0)
               }
             } else if (country.key === 'ROW') {
               // Calculate ROW (Rest of World) - all countries except the main ones
               const mainCountries = ['United States', 'United Kingdom', 'Sweden', 'Germany', 'Australia', 'Canada', 'France']
-              currentValue = Object.entries(week.countries).reduce((sum: number, [countryName, customers]: [string, any]) => {
-                if (!mainCountries.includes(countryName)) {
-                  return sum + customers
-                }
-                return sum
-              }, 0)
-              if (week.last_year) {
-                lastYearValue = Object.entries(week.last_year.countries).reduce((sum: number, [countryName, customers]: [string, any]) => {
+              if (week.countries && typeof week.countries === 'object') {
+                currentValue = Object.entries(week.countries).reduce((sum: number, [countryName, spend]: [string, any]) => {
                   if (!mainCountries.includes(countryName)) {
-                    return sum + customers
+                    return sum + (Number(spend) || 0)
+                  }
+                  return sum
+                }, 0)
+              }
+              if (week.last_year && week.last_year.countries && typeof week.last_year.countries === 'object') {
+                lastYearValue = Object.entries(week.last_year.countries).reduce((sum: number, [countryName, spend]: [string, any]) => {
+                  if (!mainCountries.includes(countryName)) {
+                    return sum + (Number(spend) || 0)
                   }
                   return sum
                 }, 0)
               }
             } else {
               // Specific country
-              currentValue = week.countries[country.key] || 0
-              if (week.last_year) {
-                lastYearValue = week.last_year.countries[country.key] || 0
+              if (week.countries && week.countries[country.key]) {
+                currentValue = Number(week.countries[country.key]) || 0
+              }
+              if (week.last_year && week.last_year.countries && week.last_year.countries[country.key]) {
+                lastYearValue = Number(week.last_year.countries[country.key]) || 0
               }
             }
             
@@ -128,6 +151,7 @@ export default function MarketingSpendPerCountry() {
                       left: 12,
                       right: 12,
                     }}
+                    isAnimationActive={isAnimationActive}
                   >
                     <CartesianGrid vertical={false} />
                     <XAxis
@@ -146,13 +170,15 @@ export default function MarketingSpendPerCountry() {
                       type="natural"
                       stroke="#4B5563"
                       strokeWidth={2}
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     >
                       <LabelList
                         position="top"
                         offset={12}
                         fill="#4B5563"
                         fontSize={12}
-                        formatter={(value: number) => formatValue(value)}
+                        formatter={(label: unknown) => formatValue(Number(label ?? 0))}
                       />
                     </Line>
                     <Line
@@ -161,6 +187,8 @@ export default function MarketingSpendPerCountry() {
                       stroke="#F97316"
                       strokeWidth={2}
                       strokeDasharray="5 5"
+                      isAnimationActive={isAnimationActive}
+                      animationDuration={isAnimationActive ? undefined : 0}
                     />
                   </LineChart>
                 </ChartContainer>

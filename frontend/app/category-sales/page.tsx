@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react'
 import CategorySalesTable from '@/components/CategorySalesTable'
-import { getPeriods } from '@/lib/api'
+import { getPeriods, type PeriodsResponse } from '@/lib/api'
 import { Loader2 } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useDataCache } from '@/contexts/DataCacheContext'
@@ -10,7 +10,7 @@ import { useState } from 'react'
 
 export default function CategorySales() {
   const { baseWeek } = useDataCache()
-  const [periods, setPeriods] = useState(null)
+  const [periods, setPeriods] = useState<PeriodsResponse | null>(null)
 
   // Load periods on mount and when baseWeek changes
   useEffect(() => {
@@ -50,4 +50,3 @@ export default function CategorySales() {
     </div>
   )
 }
-

@@ -168,6 +168,23 @@ export interface GeneratePDFResponse {
   download_url: string
 }
 
+export async function generatePDF(baseWeek: string, periods: string[]): Promise<GeneratePDFResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/generate/pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ base_week: baseWeek, periods }),
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(text || `Failed to generate PDF: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export function getDownloadUrl(filename: string): string {
+  return `${API_BASE_URL}/api/download/${encodeURIComponent(filename)}`
+}
+
 export async function getPeriods(baseWeek: string): Promise<PeriodsResponse> {
   const response = await fetch(`${API_BASE_URL}/api/periods?base_week=${baseWeek}`)
   if (!response.ok) {
@@ -185,16 +202,34 @@ export async function getTable1Metrics(baseWeek: string, periods: string[], incl
   return response.json()
 }
 
-export async function getTopMarkets(baseWeek: string, numWeeks: number = 8): Promise<MarketsResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/markets/top?base_week=${baseWeek}&num_weeks=${numWeeks}`)
+export async function getTopMarkets(
+  baseWeek: string,
+  numWeeks: number = 8,
+  recalculate: boolean = false
+): Promise<MarketsResponse> {
+  const params = new URLSearchParams({
+    base_week: baseWeek,
+    num_weeks: String(numWeeks),
+    ...(recalculate && { recalculate: 'true' }),
+  })
+  const response = await fetch(`${API_BASE_URL}/api/markets/top?${params}`)
   if (!response.ok) {
     throw new Error(`Failed to fetch markets: ${response.statusText}`)
   }
   return response.json()
 }
 
-export async function getOnlineKPIs(baseWeek: string, numWeeks: number = 8): Promise<OnlineKPIsResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/online-kpis?base_week=${baseWeek}&num_weeks=${numWeeks}`)
+export async function getOnlineKPIs(
+  baseWeek: string,
+  numWeeks: number = 8,
+  country?: string
+): Promise<OnlineKPIsResponse> {
+  const params = new URLSearchParams({
+    base_week: baseWeek,
+    num_weeks: String(numWeeks),
+  })
+  if (country) params.set('country', country)
+  const response = await fetch(`${API_BASE_URL}/api/online-kpis?${params.toString()}`)
   if (!response.ok) {
     throw new Error(`Failed to fetch Online KPIs: ${response.statusText}`)
   }
@@ -467,6 +502,67 @@ export interface TotalContributionPerCountryResponse {
   }
 }
 
+/** Budget general: aggregated by month (same shape as /api/budget-general). */
+export interface BudgetGeneralResponse {
+  week: string
+  months: string[]
+  metrics: string[]
+  table: Record<string, Record<string, number>>
+  totals: Record<string, number>
+  ytd_totals: Record<string, number>
+  customer_by_metric?: Record<string, string>
+  display_name_by_metric?: Record<string, string>
+  error?: string
+}
+
+/** Actuals general: same shape as budget-general when implemented. */
+export interface ActualsGeneralResponse {
+  week?: string
+  months?: string[]
+  metrics?: string[]
+  table?: Record<string, Record<string, number>>
+  totals?: Record<string, number>
+  ytd_totals?: Record<string, number>
+  error?: string
+}
+
+export interface CustomerQualityScorecardResponse {
+  window_days: number
+  baseline_months: number
+  latest: any | null
+  baseline: Record<string, any>
+  trend: any[]
+  meta?: Record<string, any>
+  diagnostics?: Record<string, any>
+}
+
+export interface CustomerQualityDiscountDepthResponse {
+  window_days: number
+  buckets: Array<{
+    bucket: string
+    customers: number
+    repeat_rate: number
+    net_sales_per_customer: number
+    full_price_revenue_share: number | null
+    discount_cost_rate: number | null
+  }>
+  meta?: Record<string, any>
+}
+
+export interface CustomerQualitySegmentsResponse {
+  window_days: number
+  segments: Array<Record<string, any>>
+  value_metric: string
+  meta?: Record<string, any>
+}
+
+export interface CustomerQualityPathwaysResponse {
+  window_days: number
+  trend: Array<Record<string, any>>
+  baseline: Record<string, any>
+  meta?: Record<string, any>
+}
+
 export async function getTopProducts(baseWeek: string, numWeeks: number = 1, topN: number = 20, customerType: 'new' | 'returning' = 'new'): Promise<TopProductsResponse> {
   const response = await fetch(`${API_BASE_URL}/api/top-products?base_week=${baseWeek}&num_weeks=${numWeeks}&top_n=${topN}&customer_type=${customerType}`)
   if (!response.ok) {
@@ -622,24 +718,403 @@ export async function getBatchMetrics(baseWeek: string, numWeeks: number = 8): P
   return response.json()
 }
 
-export async function generatePDF(baseWeek: string, periods: string[]): Promise<GeneratePDFResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/generate/pdf`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      base_week: baseWeek,
-      periods: periods,
-    }),
-  })
-  
+export async function getBudgetGeneral(week: string): Promise<BudgetGeneralResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/budget-general?week=${encodeURIComponent(week)}`)
   if (!response.ok) {
-    throw new Error(`Failed to generate PDF: ${response.statusText}`)
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err?.detail || `Failed to fetch budget general: ${response.statusText}`)
   }
   return response.json()
 }
 
-export function getDownloadUrl(filename: string): string {
-  return `${API_BASE_URL}/api/download/${filename}`
+export async function getActualsGeneral(week: string): Promise<ActualsGeneralResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/actuals-general?week=${encodeURIComponent(week)}`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err?.detail || `Failed to fetch actuals general: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getBudgetRaw(week: string): Promise<{ week: string; columns: string[]; row_count: number; sample_data: Record<string, unknown>[]; error?: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/budget-data?week=${encodeURIComponent(week)}`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err?.detail || err?.error || `Failed to fetch budget data: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getActualsMarkets(week: string): Promise<{ columns: string[]; sample_data: Record<string, unknown>[] }> {
+  const response = await fetch(`${API_BASE_URL}/api/actuals-markets?week=${encodeURIComponent(week)}`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err?.detail || err?.error || `Failed to fetch actuals markets: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getActualsMarketsDetailed(week: string): Promise<Record<string, unknown>> {
+  const response = await fetch(`${API_BASE_URL}/api/actuals-markets-detailed?week=${encodeURIComponent(week)}`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err?.detail || err?.error || `Failed to fetch actuals markets detailed: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+/** Verify Supabase connection (env, client, query). Returns exact status for each step – no guesswork. */
+export async function verifySupabase(): Promise<{
+  env_file_loaded: boolean
+  SUPABASE_URL: string
+  SUPABASE_SERVICE_ROLE_KEY: string
+  key_length: number
+  client_created: boolean
+  client_error: string | null
+  query_ok: boolean
+  query_error: string | null
+  table_row_count: number | null
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/supabase/verify`)
+  if (!response.ok) throw new Error(`Verify failed: ${response.statusText}`)
+  return response.json()
+}
+
+/** Sync precomputed metrics for the given week to Supabase (backend computes and saves). Call when user clicks "Refresh all data". */
+export async function syncSupabase(
+  baseWeek: string,
+  numWeeks: number = 8
+): Promise<{ success: boolean; week: string; row_counts?: Record<string, number>; elapsed_seconds?: number; sync_id?: string; error?: string }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/sync-supabase?week=${encodeURIComponent(baseWeek)}&num_weeks=${numWeeks}`,
+    { method: 'POST' }
+  )
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(data?.detail || data?.error || `Sync failed: ${response.statusText}`)
+  }
+  return data
+}
+
+export interface DiscountsMonthlyResponse {
+  months: string[]
+  current: Record<string, Record<string, number>> | null
+  last_year: Record<string, Record<string, number>> | null
+}
+
+export async function getDiscountsSalesYoY(
+  baseWeek: string,
+  numWeeks: number = 8,
+  segment: 'all' | 'new' | 'returning' = 'all',
+  expanded: boolean = false
+): Promise<any> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/discounts/sales-yoy?base_week=${baseWeek}&num_weeks=${numWeeks}&segment=${segment}&expanded=${expanded}`
+  )
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Discounts YoY: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getDiscountsMonthlyMetrics(
+  baseWeek: string,
+  months: number = 12,
+  segment: 'all' | 'new' | 'returning' = 'all'
+): Promise<DiscountsMonthlyResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/discounts/monthly-metrics?base_week=${baseWeek}&months=${months}&segment=${segment}`
+  )
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Discounts monthly metrics: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getDiscountsSummaryMetrics(baseWeek: string, includeYtd: boolean = true): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/discounts/summary?base_week=${baseWeek}&include_ytd=${includeYtd}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Discounts summary: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getDiscountsLtmMetrics(baseWeek: string): Promise<any> {
+  const response = await fetch(`${API_BASE_URL}/api/discounts/ltm?base_week=${baseWeek}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Discounts LTM: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getDiscountsProducts(
+  baseWeek: string,
+  numWeeks: number = 8,
+  segment: 'all' | 'new' | 'returning' = 'all',
+  granularity: 'week' | 'month' = 'week',
+  months: number = 12
+): Promise<any> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/discounts/products?base_week=${baseWeek}&num_weeks=${numWeeks}&segment=${segment}&granularity=${granularity}&months=${months}`
+  )
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Discounts products: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export interface DiscountsCustomersResponse {
+  window?: { start?: string; end?: string }
+  segments_overall?: Array<{
+    segment: string
+    customers: number
+    orders: number
+    revenue: number
+    aov: number
+    rev_per_customer: number
+    orders_per_customer: number
+  }>
+  first_purchase?: Array<{
+    first_segment: string
+    customers: number
+    repeat_customers: number
+    repeat_rate_pct: number
+    repeat_full_price: number
+    repeat_sale: number
+    repeat_mixed: number
+    no_repeat: number
+  }>
+}
+
+export async function getDiscountsCustomers(
+  baseWeek: string,
+  months: number = 12,
+  segment: 'all' | 'new' | 'returning' = 'all'
+): Promise<DiscountsCustomersResponse> {
+  // Stub: no backend endpoint yet – return empty structure so UI renders
+  return { window: {}, segments_overall: [], first_purchase: [] }
+}
+
+export async function getCustomerQualityScorecard(
+  baseWeek: string,
+  windowDays: number = 180,
+  asOfDate?: string,
+  baselineMonths: number = 24
+): Promise<CustomerQualityScorecardResponse> {
+  const params = new URLSearchParams({
+    base_week: baseWeek,
+    window_days: String(windowDays),
+    baseline_months: String(baselineMonths),
+  })
+  if (asOfDate) params.set('as_of_date', asOfDate)
+  const response = await fetch(`${API_BASE_URL}/api/customer-quality/scorecard?${params.toString()}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch customer quality scorecard: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getCustomerQualityDiscountDepth(
+  baseWeek: string,
+  windowDays: number = 180,
+  asOfDate?: string
+): Promise<CustomerQualityDiscountDepthResponse> {
+  const params = new URLSearchParams({
+    base_week: baseWeek,
+    window_days: String(windowDays),
+  })
+  if (asOfDate) params.set('as_of_date', asOfDate)
+  const response = await fetch(`${API_BASE_URL}/api/customer-quality/discount-depth?${params.toString()}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch customer quality discount depth: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getCustomerQualitySegments(
+  baseWeek: string,
+  windowDays: number = 180,
+  asOfDate: string | undefined,
+  thresholdLow: number,
+  thresholdHigh: number
+): Promise<CustomerQualitySegmentsResponse> {
+  const params = new URLSearchParams({
+    base_week: baseWeek,
+    window_days: String(windowDays),
+    threshold_low: String(thresholdLow),
+    threshold_high: String(thresholdHigh),
+  })
+  if (asOfDate) params.set('as_of_date', asOfDate)
+  const response = await fetch(`${API_BASE_URL}/api/customer-quality/segments?${params.toString()}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch customer quality segments: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function getCustomerQualityPathways(
+  baseWeek: string,
+  windowDays: number = 180,
+  asOfDate: string | undefined,
+  thresholdLow: number,
+  thresholdHigh: number,
+  baselineMonths: number = 24
+): Promise<CustomerQualityPathwaysResponse> {
+  const params = new URLSearchParams({
+    base_week: baseWeek,
+    window_days: String(windowDays),
+    threshold_low: String(thresholdLow),
+    threshold_high: String(thresholdHigh),
+    baseline_months: String(baselineMonths),
+  })
+  if (asOfDate) params.set('as_of_date', asOfDate)
+  const response = await fetch(`${API_BASE_URL}/api/customer-quality/pathways?${params.toString()}`)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch customer quality pathways: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+// Discounts Categories API functions
+export async function getDiscountsCategories(
+  baseWeek: string,
+  isoWeek: string,
+  segment: string = 'all'
+): Promise<any> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+  
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/discounts/categories?base_week=${baseWeek}&iso_week=${isoWeek}&segment=${segment}`,
+      { signal: controller.signal }
+    )
+    clearTimeout(timeoutId)
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Discounts Categories: ${response.statusText}`)
+    }
+    return response.json()
+  } catch (error: any) {
+    clearTimeout(timeoutId)
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+      throw new Error('Request timeout. The calculation is taking longer than expected.')
+    }
+    throw error
+  }
+}
+
+export async function getDiscountsCategoriesMonthly(
+  baseWeek: string,
+  month: string,
+  segment: string = 'all'
+): Promise<any> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+  
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/discounts/categories-monthly?base_week=${baseWeek}&month=${month}&segment=${segment}`,
+      { signal: controller.signal }
+    )
+    clearTimeout(timeoutId)
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Discounts Categories Monthly: ${response.statusText}`)
+    }
+    return response.json()
+  } catch (error: any) {
+    clearTimeout(timeoutId)
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+      throw new Error('Request timeout. The calculation is taking longer than expected.')
+    }
+    throw error
+  }
+}
+
+export async function getDiscountsCategorySeries(
+  baseWeek: string,
+  category: string,
+  segment: string = 'all',
+  expanded: boolean = false
+): Promise<any> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+  
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/discounts/category-series?base_week=${baseWeek}&category=${category}&segment=${segment}&expanded=${expanded}`,
+      { signal: controller.signal }
+    )
+    clearTimeout(timeoutId)
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Discounts Category Series: ${response.statusText}`)
+    }
+    return response.json()
+  } catch (error: any) {
+    clearTimeout(timeoutId)
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+      throw new Error('Request timeout. The calculation is taking longer than expected.')
+    }
+    throw error
+  }
+}
+
+export async function getDiscountsCategoryCountries(
+  baseWeek: string,
+  isoWeek: string,
+  category: string,
+  segment: string = 'all'
+): Promise<any> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+  
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/discounts/category-countries?base_week=${baseWeek}&iso_week=${isoWeek}&category=${category}&segment=${segment}`,
+      { signal: controller.signal }
+    )
+    clearTimeout(timeoutId)
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Discounts Category Countries: ${response.statusText}`)
+    }
+    return response.json()
+  } catch (error: any) {
+    clearTimeout(timeoutId)
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+      throw new Error('Request timeout. The calculation is taking longer than expected.')
+    }
+    throw error
+  }
+}
+
+export async function getDiscountsCategoryCountriesMonthly(
+  baseWeek: string,
+  month: string,
+  category: string,
+  segment: string = 'all'
+): Promise<any> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+  
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/discounts/category-countries-monthly?base_week=${baseWeek}&month=${month}&category=${category}&segment=${segment}`,
+      { signal: controller.signal }
+    )
+    clearTimeout(timeoutId)
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Discounts Category Countries Monthly: ${response.statusText}`)
+    }
+    return response.json()
+  } catch (error: any) {
+    clearTimeout(timeoutId)
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+      throw new Error('Request timeout. The calculation is taking longer than expected.')
+    }
+    throw error
+  }
 }

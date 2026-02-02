@@ -1,7 +1,8 @@
 """CSV adapter for loading budget data."""
 import csv
+import io
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import pandas as pd
 from loguru import logger
 
@@ -69,8 +70,55 @@ def load_csv_files(source_path: Path, source_name: str) -> pd.DataFrame:
     return combined_df
 
 
-def load_data(raw_data_path: Path) -> pd.DataFrame:
-    """Load Budget data from CSV files."""
+def load_data(raw_data_path: Path, base_week: Optional[str] = None) -> pd.DataFrame:
+    """
+    Load Budget data, preferring Supabase storage (reused by year) over local files.
+    
+    Args:
+        raw_data_path: Path to raw data directory (e.g., data/raw/2025-42)
+        base_week: ISO week format (YYYY-WW) - used to extract year for Supabase lookup
+    
+    Returns:
+        DataFrame with budget data
+    """
+    # Try Supabase first (if week is provided)
+    if base_week:
+        try:
+            from weekly_report.src.adapters.supabase_client import get_supabase_client
+            supabase = get_supabase_client()
+            if supabase:
+                # Extract year from week (ISO format: YYYY-WW)
+                year = int(base_week.split("-")[0])
+                
+                # Query Supabase for budget file for this year
+                result = supabase.table("budget_files").select("*").eq("year", year).limit(1).execute()
+                
+                if result.data and len(result.data) > 0:
+                    budget_file = result.data[0]
+                    content = budget_file["content"]
+                    filename = budget_file.get("filename", "budget.csv")
+                    
+                    logger.info(f"📦 Loading budget file from Supabase (year {year}, uploaded week {budget_file.get('week', 'unknown')})")
+                    
+                    # Read CSV from string content
+                    df = pd.read_csv(
+                        io.StringIO(content),
+                        na_values=['', 'NULL', 'null', 'N/A', 'n/a']
+                    )
+                    
+                    # Add source metadata
+                    df['_source_file'] = filename
+                    df['_source_type'] = "budget"
+                    df['_source_location'] = "supabase"
+                    
+                    logger.info(f"✅ Loaded budget from Supabase: {df.shape}")
+                    return df
+                else:
+                    logger.info(f"No budget file found in Supabase for year {year}, falling back to local files")
+        except Exception as e:
+            logger.warning(f"Failed to load budget from Supabase (falling back to local): {e}")
+    
+    # Fallback to local files
     source_path = raw_data_path / "budget"
     
     if not source_path.exists():
@@ -86,5 +134,8 @@ def load_data(raw_data_path: Path) -> pd.DataFrame:
                 f"Fallback tried: {fallback_path}"
             )
     
+    logger.info(f"📁 Loading budget file from local path: {source_path}")
     return load_csv_files(source_path, "budget")
+
+
 

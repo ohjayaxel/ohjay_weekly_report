@@ -164,6 +164,8 @@ def get_ytd_periods_for_week(iso_week: str) -> Dict[str, Dict[str, str]]:
     """
     Calculate YTD periods from April 1st (Fiscal Year start) for a given ISO week.
     
+    If the week is before April 1st, YTD spans from previous year's April 1st to current week end.
+    
     Args:
         iso_week: ISO week format like '2025-42'
         
@@ -185,19 +187,43 @@ def get_ytd_periods_for_week(iso_week: str) -> Dict[str, Dict[str, str]]:
     
     # Get the end date of the current week
     week_end = get_week_date_range(iso_week)['end']
+    week_end_dt = datetime.strptime(week_end, '%Y-%m-%d')
     
-    # Calculate YTD for current year (from April 1st)
-    fy_start_current = f"{year}-04-01"
+    # Calculate YTD for current year
+    # If week is before April 1st, YTD spans from previous year's April 1st to current week end
+    fy_start_current_dt = datetime(year, 4, 1)
+    if week_end_dt < fy_start_current_dt:
+        # Week is before April 1st, so YTD spans from previous year's April 1st
+        fy_start_current = f"{year-1}-04-01"
+    else:
+        # Week is on or after April 1st, so YTD spans from current year's April 1st
+        fy_start_current = f"{year}-04-01"
     
     # Calculate YTD for last year (same week in previous year)
     last_year_iso_week = f"{year-1}-{week:02d}"
     week_end_last_year = get_week_date_range(last_year_iso_week)['end']
-    fy_start_last_year = f"{year-1}-04-01"
+    week_end_last_year_dt = datetime.strptime(week_end_last_year, '%Y-%m-%d')
+    
+    fy_start_last_year_dt = datetime(year-1, 4, 1)
+    if week_end_last_year_dt < fy_start_last_year_dt:
+        # Week is before April 1st, so YTD spans from previous year's April 1st
+        fy_start_last_year = f"{year-2}-04-01"
+    else:
+        # Week is on or after April 1st, so YTD spans from last year's April 1st
+        fy_start_last_year = f"{year-1}-04-01"
     
     # Calculate YTD for 2023 (same week in 2023)
     iso_week_2023 = f"2023-{week:02d}"
     week_end_2023 = get_week_date_range(iso_week_2023)['end']
-    fy_start_2023 = "2023-04-01"
+    week_end_2023_dt = datetime.strptime(week_end_2023, '%Y-%m-%d')
+    
+    fy_start_2023_dt = datetime(2023, 4, 1)
+    if week_end_2023_dt < fy_start_2023_dt:
+        # Week is before April 1st, so YTD spans from previous year's April 1st
+        fy_start_2023 = "2022-04-01"
+    else:
+        # Week is on or after April 1st, so YTD spans from 2023's April 1st
+        fy_start_2023 = "2023-04-01"
     
     periods = {
         'ytd_actual': {

@@ -7,7 +7,7 @@ from loguru import logger
 
 from weekly_report.src.adapters import qlik
 from weekly_report.src.periods.calculator import get_week_date_range
-from weekly_report.src.metrics.table1 import load_all_raw_data, filter_data_for_period
+from weekly_report.src.metrics.table1 import load_all_raw_data
 
 
 def calculate_top_markets_for_weeks(base_week: str, num_weeks: int, data_root: Path) -> Dict[str, Any]:
@@ -31,35 +31,45 @@ def calculate_top_markets_for_weeks(base_week: str, num_weeks: int, data_root: P
     week = int(match[1])
     
     # Generate list of weeks to analyze (current year)
+    # Go back num_weeks from base_week, excluding week 53
     weeks_to_analyze = []
-    for i in range(num_weeks):
+    i = 0
+    while len(weeks_to_analyze) < num_weeks:
         week_num = week - i
+        week_year = year
         if week_num < 1:
             # Need to go back to previous year
             prev_year = year - 1
+            week_year = prev_year
             # Check if previous year had 53 weeks
             if _has_53_weeks(prev_year):
                 week_num = 53 + week_num
             else:
                 week_num = 52 + week_num
-            weeks_to_analyze.append(f"{prev_year}-{week_num:02d}")
-        else:
-            weeks_to_analyze.append(f"{year}-{week_num:02d}")
+            
+            # Exclude week 53
+            if week_num == 53:
+                # Skip week 53, use week 52 instead
+                week_num = 52
+                i += 1
+                continue
+        
+        week_str = f"{week_year}-{week_num:02d}"
+        if week_str not in weeks_to_analyze:
+            weeks_to_analyze.append(week_str)
+        i += 1
     
-    # Generate list of last year weeks (same week numbers, previous year)
-    last_year_weeks = []
-    for week_str in weeks_to_analyze:
-        week_year, week_num = week_str.split('-')
-        last_year_weeks.append(f"{int(week_year) - 1}-{week_num}")
-    
-    # Reverse to match order
+    # Generate list of last year weeks (same week numbers, previous year) for Y/Y baseline
+    last_year_weeks = [get_last_year_week_for_yoy(w) for w in weeks_to_analyze]
+
+    # Reverse to match chronological order (oldest first)
     weeks_to_analyze = weeks_to_analyze[::-1]
     last_year_weeks = last_year_weeks[::-1]
     
     logger.info(f"Analyzing weeks: {weeks_to_analyze}")
     logger.info(f"Last year weeks: {last_year_weeks}")
     
-    # Load all raw data from the requested base_week (not the first of weeks_to_analyze)
+    # Load raw data: base_week folder has current-year weeks; last-year weeks need their own folders
     latest_data_path = data_root / "raw" / base_week
     
     try:
@@ -69,32 +79,66 @@ def calculate_top_markets_for_weeks(base_week: str, num_weeks: int, data_root: P
         logger.error(f"Failed to load raw data: {e}")
         raise
     
-    # Calculate revenue per country per week (both current and last year)
+    # Use same pattern as category_sales: filter qlik by iso_week (already added by load_all_raw_data)
+    # so multi-year data in one file works the same way as on Category Sales
+    qlik_df = all_raw_data['qlik']
+    if 'iso_week' not in qlik_df.columns and 'Date' in qlik_df.columns:
+        qlik_df = qlik_df.copy()
+        qlik_df['Date'] = pd.to_datetime(qlik_df['Date'], errors='coerce')
+        iso_cal = qlik_df['Date'].dt.isocalendar()
+        qlik_df['iso_week'] = iso_cal['year'].astype(str) + '-' + iso_cal['week'].astype(str).str.zfill(2)
+    online_df = qlik_df[qlik_df['Sales Channel'] == 'Online'].copy() if 'Sales Channel' in qlik_df.columns else qlik_df.copy()
+    
     country_weeks_data = {}
+    
+    def _add_week_revenue_from_df(week_str: str, df: pd.DataFrame) -> None:
+        """Filter df by iso_week == week_str and add country revenue (same logic as category_sales)."""
+        if 'iso_week' not in df.columns or 'Country' not in df.columns or 'Gross Revenue' not in df.columns:
+            return
+        week_df = df[df['iso_week'] == week_str]
+        if week_df.empty:
+            return
+        country_revenue = week_df.groupby('Country')['Gross Revenue'].sum()
+        for country, revenue in country_revenue.items():
+            if country not in country_weeks_data:
+                country_weeks_data[country] = {}
+            country_weeks_data[country][week_str] = float(revenue)
     
     all_weeks = list(set(weeks_to_analyze + last_year_weeks))
     logger.info(f"Processing {len(all_weeks)} weeks total: {all_weeks}")
     
-    for week_str in all_weeks:
-        try:
-            # Filter data for this week
-            filtered_data = filter_data_for_period(all_raw_data, week_str)
-            qlik_df = filtered_data['qlik']
-            
-            # Group by Country and sum Online Gross Revenue
-            if 'Country' in qlik_df.columns and 'Gross Revenue' in qlik_df.columns:
-                country_revenue = qlik_df[
-                    qlik_df['Sales Channel'] == 'Online'
-                ].groupby('Country')['Gross Revenue'].sum()
-                
-                for country, revenue in country_revenue.items():
-                    if country not in country_weeks_data:
-                        country_weeks_data[country] = {}
-                    country_weeks_data[country][week_str] = float(revenue)
-                    
-        except Exception as e:
-            logger.warning(f"Failed to process week {week_str}: {e}")
-            # Continue with other weeks
+    # 1) Current-year weeks from base_week folder (same file has 2022-2026)
+    for week_str in weeks_to_analyze:
+        _add_week_revenue_from_df(week_str, online_df)
+    
+    # 2) Last-year weeks from same base_week folder (multi-year data)
+    for week_str in last_year_weeks:
+        _add_week_revenue_from_df(week_str, online_df)
+    
+    # 3) Last-year weeks: if data/raw/{last_year_week}/ exists, load and add (overwrites zeros)
+    #    This is required for Y/Y GROWTH% on 2025-W50/51/52 (baseline 2024-W50/51/52) when base file has no 2024 data
+    data_root_resolved = data_root.resolve()
+    for week_str in last_year_weeks:
+        week_path = data_root_resolved / "raw" / week_str
+        if week_path.exists():
+            try:
+                ly_raw = load_all_raw_data(week_path)
+                ly_qlik = ly_raw['qlik']
+                if 'iso_week' not in ly_qlik.columns and 'Date' in ly_qlik.columns:
+                    ly_qlik = ly_qlik.copy()
+                    ly_qlik['Date'] = pd.to_datetime(ly_qlik['Date'], errors='coerce')
+                    iso_cal = ly_qlik['Date'].dt.isocalendar()
+                    ly_qlik['iso_week'] = iso_cal['year'].astype(str) + '-' + iso_cal['week'].astype(str).str.zfill(2)
+                ly_online = ly_qlik[ly_qlik['Sales Channel'] == 'Online'].copy() if 'Sales Channel' in ly_qlik.columns else ly_qlik.copy()
+                _add_week_revenue_from_df(week_str, ly_online)
+                logger.info(f"Loaded last-year data for Y/Y from {week_path}")
+            except Exception as e:
+                logger.warning(f"Could not load last-year data for {week_str}: {e}")
+        else:
+            # No folder for this last-year week; Y/Y will show "-" for that week if base file had no data
+            total_for_week = sum(country_weeks_data.get(c, {}).get(week_str, 0) for c in country_weeks_data)
+            if total_for_week == 0:
+                logger.info(f"Last-year week {week_str}: no data in base file and folder {week_path} not found (Y/Y will show '-' for this week)")
     
     # Calculate averages and sort (only for current year weeks)
     markets_list = []
@@ -186,7 +230,21 @@ def calculate_top_markets_for_weeks(base_week: str, num_weeks: int, data_root: P
 def _has_53_weeks(year: int) -> bool:
     """Check if a year has 53 ISO weeks."""
     from datetime import datetime
-    
+
     jan_4 = datetime(year, 1, 4)
     return jan_4.weekday() >= 3
+
+
+def get_last_year_week_for_yoy(week_str: str) -> str:
+    """
+    Return the same ISO week number in the previous year (baseline for Y/Y GROWTH%).
+    E.g. 2025-50 -> 2024-50, 2026-01 -> 2025-01. Week 53 maps to 52 if previous year has no 53.
+    """
+    week_year, week_num = week_str.split('-')
+    week_year_int = int(week_year)
+    week_num_int = int(week_num)
+    prev_year = week_year_int - 1
+    if week_num_int == 53 and not _has_53_weeks(prev_year):
+        return f"{prev_year}-52"
+    return f"{prev_year}-{week_num_int:02d}"
 

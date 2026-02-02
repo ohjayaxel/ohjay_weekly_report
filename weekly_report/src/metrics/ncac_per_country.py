@@ -102,13 +102,15 @@ def calculate_ncac_per_country_for_weeks(base_week: str, num_weeks: int, data_ro
     results = []
     
     # Load DEMA spend and Qlik data
-    logger.info(f"Loading DEMA spend and Qlik data from {data_root}")
-    raw_data = load_all_raw_data(data_root)
+    # data_root is ./data, so we need data_root/raw/{base_week}
+    raw_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading DEMA spend and Qlik data from {raw_data_path}")
+    raw_data = load_all_raw_data(raw_data_path)
     dema_df = raw_data.get('dema_spend', pd.DataFrame())
     qlik_df = raw_data.get('qlik', pd.DataFrame())
     
     if dema_df.empty or qlik_df.empty:
-        logger.warning(f"No DEMA spend or Qlik data found in {data_root}")
+        logger.warning(f"No DEMA spend or Qlik data found in {raw_data_path}")
         return []
     
     # Add iso_week column if not present

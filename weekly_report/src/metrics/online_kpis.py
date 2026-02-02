@@ -30,6 +30,48 @@ def filter_data_by_iso_week(df: pd.DataFrame, iso_week: str, date_column: str = 
     return filtered
 
 
+def _has_53_weeks(year: int) -> bool:
+    """Check if a year has 53 ISO weeks."""
+    from datetime import datetime
+    jan_4 = datetime(year, 1, 4)
+    return jan_4.weekday() >= 3
+
+
+def _get_last_year_week_for_yoy(week_str: str) -> str:
+    """Return same ISO week number in previous year; week 53 maps to 52 if needed."""
+    y_str, w_str = week_str.split("-")
+    year = int(y_str)
+    week = int(w_str)
+    prev_year = year - 1
+    if week == 53 and not _has_53_weeks(prev_year):
+        week = 52
+    return f"{prev_year}-{week:02d}"
+
+
+def _build_weeks(base_week: str, num_weeks: int) -> List[str]:
+    """Build last N ISO weeks ending at base_week, excluding week 53."""
+    year, week = map(int, base_week.split("-"))
+    weeks: List[str] = []
+    i = 0
+    while len(weeks) < num_weeks:
+        week_num = week - i
+        week_year = year
+        if week_num < 1:
+            prev_year = year - 1
+            week_year = prev_year
+            week_num = (53 if _has_53_weeks(prev_year) else 52) + week_num
+            if week_num == 53:
+                week_num = 52
+                i += 1
+                continue
+        week_str = f"{week_year}-{week_num:02d}"
+        if week_str not in weeks:
+            weeks.append(week_str)
+        i += 1
+    weeks = weeks[::-1]  # oldest first
+    return weeks
+
+
 def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: Path) -> Dict[str, Any]:
     """
     Calculate Online KPIs for the last N weeks.
@@ -37,40 +79,9 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
     Returns:
         Dict with 'kpis' (list of KPI data) and 'period_info' (metadata)
     """
-    # Generate weeks to analyze
-    weeks_to_analyze = []
-    last_year_weeks = []
-    
-    # Parse base week
-    year, week_num = map(int, base_week.split('-'))
-    
-    # Generate current year weeks
-    for i in range(num_weeks):
-        week = week_num - num_weeks + 1 + i
-        if week <= 0:
-            # Adjust for previous year
-            prev_year = year - 1
-            days_in_prev_year = pd.Timestamp(f"{prev_year}-12-31").timetuple().tm_yday
-            weeks_in_prev_year = pd.Timestamp(f"{prev_year}-12-31").isocalendar()[1]
-            week = weeks_in_prev_year + week
-            year_str = f"{prev_year}-{week:02d}"
-        else:
-            year_str = f"{year}-{week:02d}"
-        weeks_to_analyze.append(year_str)
-    
-    # Generate last year weeks
-    for i in range(num_weeks):
-        week = week_num - num_weeks + 1 + i
-        if week <= 0:
-            # Adjust for previous year
-            prev_year = year - 2
-            days_in_prev_year = pd.Timestamp(f"{prev_year}-12-31").timetuple().tm_yday
-            weeks_in_prev_year = pd.Timestamp(f"{prev_year}-12-31").isocalendar()[1]
-            week = weeks_in_prev_year + week
-            year_str = f"{prev_year}-{week:02d}"
-        else:
-            year_str = f"{year-1}-{week:02d}"
-        last_year_weeks.append(year_str)
+    # Generate weeks to analyze (chronological, oldest first)
+    weeks_to_analyze = _build_weeks(base_week, num_weeks)
+    last_year_weeks = [_get_last_year_week_for_yoy(w) for w in weeks_to_analyze]
     
     logger.info(f"Calculating Online KPIs for weeks: {weeks_to_analyze}")
     logger.info(f"Last year weeks: {last_year_weeks}")
@@ -97,6 +108,7 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
             # Shopify data is loaded separately as it's not in load_all_raw_data
             from weekly_report.src.adapters.shopify import load_data as load_shopify_data
             shopify_df = load_shopify_data(latest_data_path)
+            logger.info(f"Loaded Shopify data: {shopify_df.shape}, columns: {shopify_df.columns.tolist() if not shopify_df.empty else 'empty'}")
             
             # Pre-compute ISO week column for all dataframes to avoid repeated computation
             if not qlik_df.empty and 'Date' in qlik_df.columns:
@@ -116,6 +128,17 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
                 iso_cal = shopify_df['Day'].dt.isocalendar()
                 shopify_df['iso_week'] = iso_cal['year'].astype(str) + '-' + iso_cal['week'].astype(str).str.zfill(2)
                 logger.info(f"Pre-computed ISO weeks for Shopify data: {shopify_df.shape}")
+            elif not shopify_df.empty and 'Dag' in shopify_df.columns:
+                # Handle Swedish column names
+                shopify_df['Day'] = pd.to_datetime(shopify_df['Dag'], errors='coerce')
+                iso_cal = shopify_df['Day'].dt.isocalendar()
+                shopify_df['iso_week'] = iso_cal['year'].astype(str) + '-' + iso_cal['week'].astype(str).str.zfill(2)
+                # Normalize column names: 'Sessioner' -> 'Sessions'
+                if 'Sessioner' in shopify_df.columns:
+                    shopify_df['Sessions'] = shopify_df['Sessioner']
+                logger.info(f"Pre-computed ISO weeks for Shopify data (Swedish columns): {shopify_df.shape}")
+            else:
+                logger.warning(f"Shopify data missing 'Day' or 'Dag' column. Available columns: {shopify_df.columns.tolist()}")
                 
         except Exception as e:
             logger.warning(f"Failed to load data for week {base_week}: {e}")
@@ -131,6 +154,11 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
         week_shopify_df = shopify_df.copy()
         if not shopify_df.empty and 'iso_week' in shopify_df.columns:
             week_shopify_df = shopify_df[shopify_df['iso_week'] == week_str].copy()
+            logger.debug(f"Filtered Shopify data for week {week_str}: {len(week_shopify_df)} rows (from {len(shopify_df)} total)")
+        elif not shopify_df.empty:
+            logger.warning(f"Shopify data exists but missing 'iso_week' column for week {week_str}. Available columns: {shopify_df.columns.tolist()}")
+        else:
+            logger.warning(f"No Shopify data available for week {week_str}")
         
         # Filter DEMA data by week (iso_week column already computed)
         week_dema_df = dema_df.copy()
@@ -138,11 +166,11 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
             week_dema_df = dema_df[dema_df['iso_week'] == week_str].copy()
         
         if week_qlik_df.empty:
-            logger.warning(f"Missing data for week {week_str}")
-            continue
-        
-        # Calculate KPIs
-        week_kpis = calculate_week_kpis(week_qlik_df, week_shopify_df, week_dema_df, week_str)
+            logger.warning(f"Missing data for week {week_str} (using zeros)")
+            week_kpis = calculate_week_kpis(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), week_str)
+        else:
+            # Calculate KPIs
+            week_kpis = calculate_week_kpis(week_qlik_df, week_shopify_df, week_dema_df, week_str)
         
         # Add last year comparison
         last_year_week = last_year_weeks[week_idx]
@@ -166,6 +194,8 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
                 last_year_week
             )
             week_kpis['last_year'] = last_year_kpis
+        else:
+            week_kpis['last_year'] = calculate_week_kpis(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), last_year_week)
         
         kpis_list.append(week_kpis)
     
@@ -185,6 +215,22 @@ def calculate_online_kpis_for_weeks(base_week: str, num_weeks: int, data_root: P
 def calculate_week_kpis(qlik_df: pd.DataFrame, shopify_df: pd.DataFrame, dema_df: pd.DataFrame, week_str: str) -> Dict[str, Any]:
     """Calculate KPIs for a single week."""
     
+    # Handle missing/empty Qlik data
+    if qlik_df.empty or 'Sales Channel' not in qlik_df.columns:
+        return {
+            'week': week_str,
+            'aov_new_customer': 0.0,
+            'aov_returning_customer': 0.0,
+            'cos': 0.0,
+            'marketing_spend': float(dema_df['Marketing spend'].sum()) if (not dema_df.empty and 'Marketing spend' in dema_df.columns) else 0.0,
+            'conversion_rate': 0.0,
+            'new_customers': 0,
+            'returning_customers': 0,
+            'sessions': int(shopify_df['Sessions'].sum()) if (not shopify_df.empty and 'Sessions' in shopify_df.columns) else 0,
+            'new_customer_cac': 0.0,
+            'total_orders': 0
+        }
+
     # Filter for online sales only
     online_df = qlik_df[qlik_df['Sales Channel'] == 'Online']
     
@@ -209,14 +255,24 @@ def calculate_week_kpis(qlik_df: pd.DataFrame, shopify_df: pd.DataFrame, dema_df
     aov_returning_customer = returning_customer_revenue / returning_customers if returning_customers > 0 else 0
     
     # Sessions from Shopify
-    if not shopify_df.empty and 'Sessions' in shopify_df.columns:
+    if shopify_df.empty:
+        logger.warning(f"Shopify data is empty for week {week_str}")
+        sessions = 0
+    elif 'Sessions' in shopify_df.columns:
         sessions = shopify_df['Sessions'].sum()
+        logger.debug(f"Calculated sessions for week {week_str}: {sessions}")
+    elif 'Sessioner' in shopify_df.columns:
+        # Handle Swedish column name
+        sessions = shopify_df['Sessioner'].sum()
+        logger.debug(f"Calculated sessions for week {week_str} (Swedish column): {sessions}")
     else:
+        logger.warning(f"Shopify data missing 'Sessions' or 'Sessioner' column for week {week_str}. Available columns: {shopify_df.columns.tolist()}")
         sessions = 0
     
     # Conversion rate
     unique_orders = online_df['Order No'].nunique()
     conversion_rate = (unique_orders / sessions * 100) if sessions > 0 else 0
+    logger.debug(f"Conversion rate for week {week_str}: {conversion_rate}% (orders: {unique_orders}, sessions: {sessions})")
     
     # COS (Cost of Sale) - from DEMA spend
     if not dema_df.empty and 'Marketing spend' in dema_df.columns:

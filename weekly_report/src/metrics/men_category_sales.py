@@ -42,12 +42,14 @@ def calculate_men_category_sales_for_weeks(base_week: str, num_weeks: int, data_
     results = []
     
     # Load all raw data once from base week directory
-    logger.info(f"Loading raw data from {data_root}")
-    raw_data = load_all_raw_data(data_root)
+    # data_root is ./data, so we need data_root/raw/{base_week}
+    raw_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading raw data from {raw_data_path}")
+    raw_data = load_all_raw_data(raw_data_path)
     qlik_df = raw_data.get('qlik', pd.DataFrame())
     
     if qlik_df.empty:
-        logger.warning(f"No Qlik data found in {data_root}")
+        logger.warning(f"No Qlik data found in {raw_data_path}")
         return []
     
     # Add iso_week column if not present

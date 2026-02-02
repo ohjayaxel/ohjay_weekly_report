@@ -43,11 +43,13 @@ def calculate_marketing_spend_per_country_for_weeks(base_week: str, num_weeks: i
     results = []
     
     # Load DEMA spend data
-    logger.info(f"Loading DEMA spend data from {data_root}")
-    dema_df = load_all_raw_data(data_root).get('dema_spend', pd.DataFrame())
+    # data_root is ./data, so we need data_root/raw/{base_week}
+    raw_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading DEMA spend data from {raw_data_path}")
+    dema_df = load_all_raw_data(raw_data_path).get('dema_spend', pd.DataFrame())
     
     if dema_df.empty:
-        logger.warning(f"No DEMA spend data found in {data_root}")
+        logger.warning(f"No DEMA spend data found in {raw_data_path}")
         return []
     
     # Add iso_week column if not present

@@ -56,11 +56,13 @@ def calculate_new_customers_per_country_for_weeks(base_week: str, num_weeks: int
     results = []
     
     # Load Qlik data
-    logger.info(f"Loading Qlik data from {data_root}")
-    qlik_df = load_all_raw_data(data_root).get('qlik', pd.DataFrame())
+    # data_root is ./data, so we need data_root/raw/{base_week}
+    raw_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading Qlik data from {raw_data_path}")
+    qlik_df = load_all_raw_data(raw_data_path).get('qlik', pd.DataFrame())
     
     if qlik_df.empty:
-        logger.warning(f"No Qlik data found in {data_root}")
+        logger.warning(f"No Qlik data found in {raw_data_path}")
         return []
     
     # Add iso_week column if not present

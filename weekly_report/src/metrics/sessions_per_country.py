@@ -21,6 +21,8 @@ def calculate_sessions_per_country_for_week(shopify_df: pd.DataFrame, week_str: 
     country_col = None
     if 'Session country' in shopify_df.columns:
         country_col = 'Session country'
+    elif 'Sessionsland' in shopify_df.columns:
+        country_col = 'Sessionsland'  # Swedish column name
     elif 'Country' in shopify_df.columns:
         country_col = 'Country'
     else:
@@ -30,9 +32,22 @@ def calculate_sessions_per_country_for_week(shopify_df: pd.DataFrame, week_str: 
             'countries': {}
         }
     
+    # Determine sessions column name
+    sessions_col = None
+    if 'Sessions' in shopify_df.columns:
+        sessions_col = 'Sessions'
+    elif 'Sessioner' in shopify_df.columns:
+        sessions_col = 'Sessioner'  # Swedish column name
+    else:
+        logger.warning(f"No sessions column found in Shopify data. Available columns: {shopify_df.columns.tolist()}")
+        return {
+            'week': week_str,
+            'countries': {}
+        }
+    
     # Group by country and sum sessions
     country_sessions = shopify_df.groupby(country_col).agg({
-        'Sessions': 'sum'
+        sessions_col: 'sum'
     }).reset_index()
     
     # Create result dict
@@ -45,7 +60,7 @@ def calculate_sessions_per_country_for_week(shopify_df: pd.DataFrame, week_str: 
     for _, row in country_sessions.iterrows():
         country = row[country_col]
         if pd.notna(country) and country != '-':
-            result['countries'][country] = float(row['Sessions'])
+            result['countries'][country] = float(row[sessions_col])
     
     return result
 
@@ -56,9 +71,10 @@ def calculate_sessions_per_country_for_weeks(base_week: str, num_weeks: int, dat
     results = []
     
     # Load Shopify data directly (not from cache) to ensure fresh data
-    logger.info(f"Loading Shopify data from {data_root}")
+    latest_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading Shopify data from {latest_data_path}")
     from weekly_report.src.adapters.shopify import load_data as load_shopify_data
-    shopify_df = load_shopify_data(data_root)
+    shopify_df = load_shopify_data(latest_data_path)
     
     if shopify_df.empty:
         logger.warning(f"No Shopify data found in {data_root}")
@@ -72,6 +88,8 @@ def calculate_sessions_per_country_for_weeks(base_week: str, num_weeks: int, dat
             date_col = 'Date'
         elif 'Day' in shopify_df.columns:
             date_col = 'Day'
+        elif 'Dag' in shopify_df.columns:
+            date_col = 'Dag'  # Swedish column name
         
         if date_col:
             iso_cal = pd.to_datetime(shopify_df[date_col]).dt.isocalendar()

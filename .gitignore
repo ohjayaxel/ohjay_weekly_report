@@ -19,14 +19,16 @@ out/
 *.log
 
 # Data
-data/raw/
-data/curated/
+data/
 charts/
 reports/
 
 # Cache
 cache/
 *.cache
+
+# Local dev server PIDs
+.devserver/
 
 # IDE
 .vscode/
@@ -41,3 +43,4 @@ Thumbs.db
 # Environment
 .env
 .env.local
+weekly_report/data/

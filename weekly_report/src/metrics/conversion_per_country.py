@@ -25,10 +25,25 @@ def calculate_conversion_per_country_for_week(
     country_col = None
     if 'Session country' in shopify_df.columns:
         country_col = 'Session country'
+    elif 'Sessionsland' in shopify_df.columns:
+        country_col = 'Sessionsland'  # Swedish column name
     elif 'Country' in shopify_df.columns:
         country_col = 'Country'
     else:
         logger.warning(f"No country column found in Shopify data. Available columns: {shopify_df.columns.tolist()}")
+        return {
+            'week': week_str,
+            'countries': {}
+        }
+    
+    # Determine sessions column name
+    sessions_col = None
+    if 'Sessions' in shopify_df.columns:
+        sessions_col = 'Sessions'
+    elif 'Sessioner' in shopify_df.columns:
+        sessions_col = 'Sessioner'  # Swedish column name
+    else:
+        logger.warning(f"No sessions column found in Shopify data. Available columns: {shopify_df.columns.tolist()}")
         return {
             'week': week_str,
             'countries': {}
@@ -45,7 +60,7 @@ def calculate_conversion_per_country_for_week(
     
     # Get sessions per country from Shopify data
     country_sessions = shopify_df.groupby(country_col).agg({
-        'Sessions': 'sum'
+        sessions_col: 'sum'
     }).reset_index()
     
     # Merge orders and sessions by country
@@ -56,7 +71,7 @@ def calculate_conversion_per_country_for_week(
     
     # Create a mapping from country names
     orders_dict = dict(zip(country_orders['Country'], country_orders['Orders']))
-    sessions_dict = dict(zip(country_sessions[country_col], country_sessions['Sessions']))
+    sessions_dict = dict(zip(country_sessions[country_col], country_sessions[sessions_col]))
     
     # Calculate conversion rate for each country
     for country in set(list(orders_dict.keys()) + list(sessions_dict.keys())):
@@ -85,17 +100,19 @@ def calculate_conversion_per_country_for_weeks(base_week: str, num_weeks: int, d
     results = []
     
     # Load Shopify data directly (not from cache) to ensure fresh data
-    logger.info(f"Loading Shopify data from {data_root}")
+    latest_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading Shopify data from {latest_data_path}")
     from weekly_report.src.adapters.shopify import load_data as load_shopify_data
-    shopify_df = load_shopify_data(data_root)
+    shopify_df = load_shopify_data(latest_data_path)
     
     if shopify_df.empty:
         logger.warning(f"No Shopify data found in {data_root}")
         return []
     
     # Load Qlik data
-    logger.info(f"Loading Qlik data from {data_root}")
-    qlik_df = load_all_raw_data(data_root).get('qlik', pd.DataFrame())
+    latest_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading Qlik data from {latest_data_path}")
+    qlik_df = load_all_raw_data(latest_data_path).get('qlik', pd.DataFrame())
     
     if qlik_df.empty:
         logger.warning(f"No Qlik data found in {data_root}")
@@ -108,6 +125,8 @@ def calculate_conversion_per_country_for_weeks(base_week: str, num_weeks: int, d
             date_col = 'Date'
         elif 'Day' in shopify_df.columns:
             date_col = 'Day'
+        elif 'Dag' in shopify_df.columns:
+            date_col = 'Dag'  # Swedish column name
         
         if date_col:
             iso_cal = pd.to_datetime(shopify_df[date_col]).dt.isocalendar()

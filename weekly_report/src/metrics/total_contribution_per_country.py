@@ -130,8 +130,9 @@ def calculate_total_contribution_per_country_for_weeks(base_week: str, num_weeks
     results = []
     
     # Load data
-    logger.info(f"Loading data from {data_root}")
-    raw_data = load_all_raw_data(data_root)
+    latest_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading data from {latest_data_path}")
+    raw_data = load_all_raw_data(latest_data_path)
     qlik_df = raw_data.get('qlik', pd.DataFrame())
     dema_df = raw_data.get('dema_spend', pd.DataFrame())
     dema_gm2_df = raw_data.get('dema_gm2', pd.DataFrame())

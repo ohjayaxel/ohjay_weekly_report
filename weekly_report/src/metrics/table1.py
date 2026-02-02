@@ -54,23 +54,43 @@ def calculate_table1_metrics(
     start_date = pd.to_datetime(date_range['start'])
     end_date = pd.to_datetime(date_range['end'])
     
+    # Normalize column names and critical fields to avoid locale/whitespace issues
+    qlik_df = qlik_df.copy()
+    qlik_df.columns = qlik_df.columns.str.strip()
+    if 'Sales Channel' in qlik_df.columns:
+        qlik_df['Sales Channel'] = qlik_df['Sales Channel'].astype(str).str.strip()
+    if 'Country' in qlik_df.columns:
+        qlik_df['Country'] = qlik_df['Country'].astype(str).str.strip()
+
+    # Pre-parse dates once to avoid repeated conversions and handle invalids
+    if 'Date' in qlik_df.columns:
+        qlik_df['Date'] = pd.to_datetime(qlik_df['Date'], errors='coerce')
+    
     # Filter Qlik data to the specific week
     qlik_filtered = qlik_df[
-        (pd.to_datetime(qlik_df['Date']) >= start_date) & 
-        (pd.to_datetime(qlik_df['Date']) <= end_date)
+        (qlik_df['Date'] >= start_date) & 
+        (qlik_df['Date'] <= end_date)
     ].copy()
     
     logger.debug(f"Filtered Qlik data to {len(qlik_filtered)} records for {period_week}")
     
     # Filter Dema data to the specific week
+    dema_spend_df = dema_spend_df.copy()
+    dema_spend_df.columns = dema_spend_df.columns.str.strip()
+    if 'Days' in dema_spend_df.columns:
+        dema_spend_df['Days'] = pd.to_datetime(dema_spend_df['Days'], errors='coerce')
     dema_spend_filtered = dema_spend_df[
-        (pd.to_datetime(dema_spend_df['Days']) >= start_date) & 
-        (pd.to_datetime(dema_spend_df['Days']) <= end_date)
+        (dema_spend_df['Days'] >= start_date) & 
+        (dema_spend_df['Days'] <= end_date)
     ].copy()
     
+    dema_gm2_df = dema_gm2_df.copy()
+    dema_gm2_df.columns = dema_gm2_df.columns.str.strip()
+    if 'Days' in dema_gm2_df.columns:
+        dema_gm2_df['Days'] = pd.to_datetime(dema_gm2_df['Days'], errors='coerce')
     dema_gm2_filtered = dema_gm2_df[
-        (pd.to_datetime(dema_gm2_df['Days']) >= start_date) & 
-        (pd.to_datetime(dema_gm2_df['Days']) <= end_date)
+        (dema_gm2_df['Days'] >= start_date) & 
+        (dema_gm2_df['Days'] <= end_date)
     ].copy()
     
     logger.debug(f"Filtered Dema spend data to {len(dema_spend_filtered)} records")
@@ -79,13 +99,17 @@ def calculate_table1_metrics(
     metrics = {}
     
     # 1. Online Gross Revenue = SUM(Gross Revenue WHERE Sales Channel = 'Online')
-    online_gross_revenue = qlik_filtered[
-        qlik_filtered['Sales Channel'] == 'Online'
-    ]['Gross Revenue'].sum()
+    # Guard against missing columns
+    if 'Sales Channel' in qlik_filtered.columns and 'Gross Revenue' in qlik_filtered.columns:
+        online_gross_revenue = qlik_filtered[
+            qlik_filtered['Sales Channel'] == 'Online'
+        ]['Gross Revenue'].sum()
+    else:
+        online_gross_revenue = 0.0
     metrics['online_gross_revenue'] = float(online_gross_revenue)
     
     # 2. Returns = SUM(Returns)
-    returns = qlik_filtered['Returns'].sum()
+    returns = qlik_filtered['Returns'].sum() if 'Returns' in qlik_filtered.columns else 0.0
     metrics['returns'] = float(returns)
     
     # 3. Return Rate % = (Returns / Online Gross Revenue) * 100
@@ -96,16 +120,22 @@ def calculate_table1_metrics(
     metrics['return_rate_pct'] = round(return_rate_pct, 1)
     
     # 4. Online Net Revenue = SUM(Net Revenue WHERE Sales Channel = 'Online')
-    online_net_revenue = qlik_filtered[
-        qlik_filtered['Sales Channel'] == 'Online'
-    ]['Net Revenue'].sum()
+    if 'Sales Channel' in qlik_filtered.columns and 'Net Revenue' in qlik_filtered.columns:
+        online_net_revenue = qlik_filtered[
+            qlik_filtered['Sales Channel'] == 'Online'
+        ]['Net Revenue'].sum()
+    else:
+        online_net_revenue = 0.0
     metrics['online_net_revenue'] = float(online_net_revenue)
     
     # 5. Retail Concept Store = SUM(Net Revenue WHERE Sales Channel = 'Retail' AND Country != 'Outlet')
-    retail_concept_store = qlik_filtered[
-        (qlik_filtered['Sales Channel'] == 'Retail') & 
-        (qlik_filtered['Country'] != 'Outlet')
-    ]['Net Revenue'].sum()
+    if 'Sales Channel' in qlik_filtered.columns and 'Country' in qlik_filtered.columns and 'Net Revenue' in qlik_filtered.columns:
+        retail_concept_store = qlik_filtered[
+            (qlik_filtered['Sales Channel'] == 'Retail') & 
+            (qlik_filtered['Country'] != 'Outlet')
+        ]['Net Revenue'].sum()
+    else:
+        retail_concept_store = 0.0
     metrics['retail_concept_store'] = float(retail_concept_store)
     
     # 6. Retail Pop-ups, Outlets = SUM(Net Revenue WHERE Sales Channel = 'Retail' AND Country = 'Outlet')

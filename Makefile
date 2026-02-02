@@ -1,12 +1,12 @@
 # Weekly Report Pipeline Makefile
 
-.PHONY: install run test clean help
+.PHONY: install run test clean help run-backend run-frontend
 
 # Default week
 WEEK ?= 2025-42
 
-# Python executable
-PYTHON := python
+# Python executable (use venv if present)
+PYTHON := $(if $(wildcard venv/bin/python),venv/bin/python,python)
 
 help: ## Show this help message
 	@echo "Weekly Report Pipeline"
@@ -42,4 +42,12 @@ lint: ## Run linting
 format: ## Format code
 	black src/ tests/
 	isort src/ tests/
+
+# Start backend from project root (required so weekly_report.src.compute resolves)
+run-backend: ## Start API server on port 8000 (must run from project root)
+	$(PYTHON) -m uvicorn weekly_report.api.routes:app --reload --host 0.0.0.0 --port 8000
+
+# Start frontend dev server
+run-frontend: ## Start Next.js dev server on port 3000
+	cd frontend && npm run dev
 

@@ -12,20 +12,25 @@ interface CategorySalesTableProps {
 export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps) {
   const [categorySalesData, setCategorySalesData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     const loadData = async () => {
       setLoading(true)
+      setError(null)
       try {
         const data = await getCategorySales(baseWeek, 8)
         setCategorySalesData(data)
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to load category sales:', err)
+        setError(err.message || 'Failed to load category sales data')
       } finally {
         setLoading(false)
       }
     }
-    loadData()
+    if (baseWeek) {
+      loadData()
+    }
   }, [baseWeek])
 
   const formatValue = (value: number): string => {
@@ -83,6 +88,35 @@ export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps
     )
   }
 
+  if (error) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+        <div className="flex items-center gap-2 text-red-800 mb-2">
+          <span className="font-medium">Error loading category sales data</span>
+        </div>
+        <p className="text-sm text-red-700">{error}</p>
+        <button
+          onClick={() => {
+            setError(null)
+            setLoading(true)
+            getCategorySales(baseWeek, 8)
+              .then(data => {
+                setCategorySalesData(data)
+                setLoading(false)
+              })
+              .catch(err => {
+                setError(err.message || 'Failed to load category sales data')
+                setLoading(false)
+              })
+          }}
+          className="mt-3 px-4 py-2 bg-red-100 text-red-800 rounded hover:bg-red-200 text-sm"
+        >
+          Retry
+        </button>
+      </div>
+    )
+  }
+
   const { category_sales, period_info } = categorySalesData
   
   // Get all unique categories
@@ -95,11 +129,23 @@ export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps
   const menCategories = Array.from(allCategories).filter(cat => cat.startsWith('MEN_')).map(cat => cat.replace('MEN_', ''))
   const womenCategories = Array.from(allCategories).filter(cat => cat.startsWith('WOMEN_')).map(cat => cat.replace('WOMEN_', ''))
   
-  // Get week keys
-  const weekKeys = category_sales.map((week: any) => week.week).sort()
+  // Get week keys and sort chronologically, excluding week 53
+  const weekKeys: string[] = category_sales
+    .map((week: any) => week.week)
+    .filter((week: string) => {
+      const weekNum = parseInt(week.split('-')[1])
+      return weekNum !== 53 // Exclude week 53
+    })
+    .sort((a: string, b: string) => {
+      // Sort chronologically: 2025-49, 2025-50, 2025-51, 2025-52, 2026-01, 2026-02, etc.
+      const [yearA, weekA] = a.split('-').map(Number)
+      const [yearB, weekB] = b.split('-').map(Number)
+      if (yearA !== yearB) return yearA - yearB
+      return weekA - weekB
+    })
   
   // Calculate last year weeks
-  const lastYearWeeks = weekKeys.map(week => {
+  const lastYearWeeks = weekKeys.map((week: string) => {
     const [year, weekNum] = week.split('-')
     return `${parseInt(year) - 1}-${weekNum}`
   })
@@ -107,7 +153,7 @@ export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps
   // Calculate totals for each week
   const calculateTotals = (categories: string[], gender: 'MEN' | 'WOMEN') => {
     const totals: Record<string, number> = {}
-    weekKeys.forEach(week => {
+    weekKeys.forEach((week: string) => {
       totals[week] = 0
       categories.forEach(cat => {
         const key = `${gender}_${cat}`
@@ -123,7 +169,7 @@ export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps
 
   const calculateLastYearTotals = (categories: string[], gender: 'MEN' | 'WOMEN') => {
     const totals: Record<string, number> = {}
-    weekKeys.forEach(week => {
+    weekKeys.forEach((week: string) => {
       totals[week] = 0
       categories.forEach(cat => {
         const key = `${gender}_${cat}`
@@ -143,7 +189,7 @@ export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps
   const womenLastYearTotals = calculateLastYearTotals(womenCategories, 'WOMEN')
   const grandTotals: Record<string, number> = {}
   const grandLastYearTotals: Record<string, number> = {}
-  weekKeys.forEach(week => {
+  weekKeys.forEach((week: string) => {
     grandTotals[week] = (menTotals[week] || 0) + (womenTotals[week] || 0)
     grandLastYearTotals[week] = (menLastYearTotals[week] || 0) + (womenLastYearTotals[week] || 0)
   })
@@ -162,7 +208,7 @@ export default function CategorySalesTable({ baseWeek }: CategorySalesTableProps
   const sortCategoriesByAverage = (categories: string[], gender: 'MEN' | 'WOMEN') => {
     return categories.map(category => {
       const weekValues: Record<string, number> = {}
-      weekKeys.forEach((week) => {
+      weekKeys.forEach((week: string) => {
         const weekData = category_sales.find((w: any) => w.week === week)
         weekValues[week] = weekData?.categories[`${gender}_${category}`] || 0
       })

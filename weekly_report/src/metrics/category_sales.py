@@ -3,8 +3,15 @@ from typing import Dict, Any, List
 import pandas as pd
 from loguru import logger
 from pathlib import Path
+from datetime import datetime
 
 from weekly_report.src.metrics.table1 import load_all_raw_data
+
+
+def _has_53_weeks(year: int) -> bool:
+    """Check if a year has 53 ISO weeks."""
+    jan_4 = datetime(year, 1, 4)
+    return jan_4.weekday() >= 3
 
 
 def calculate_category_sales_for_weeks(base_week: str, num_weeks: int, data_root: Path) -> List[Dict[str, Any]]:
@@ -13,12 +20,14 @@ def calculate_category_sales_for_weeks(base_week: str, num_weeks: int, data_root
     results = []
     
     # Load all raw data once from base week directory
-    logger.info(f"Loading raw data from {data_root}")
-    raw_data = load_all_raw_data(data_root)
+    # data_root is ./data, so we need data_root/raw/{base_week}
+    raw_data_path = data_root / "raw" / base_week
+    logger.info(f"Loading raw data from {raw_data_path}")
+    raw_data = load_all_raw_data(raw_data_path)
     qlik_df = raw_data.get('qlik', pd.DataFrame())
     
     if qlik_df.empty:
-        logger.warning(f"No Qlik data found in {data_root}")
+        logger.warning(f"No Qlik data found in {raw_data_path}")
         return []
     
     # Add iso_week column if not present
@@ -34,22 +43,41 @@ def calculate_category_sales_for_weeks(base_week: str, num_weeks: int, data_root
     year = int(year)
     week_num = int(week_num)
     
+    # Generate list of weeks to process (excluding week 53)
+    weeks_to_process = []
+    i = 0
+    while len(weeks_to_process) < num_weeks:
+        target_week_num = week_num - i
+        target_year = year
+        
+        if target_week_num < 1:
+            # Need to go back to previous year
+            target_year = year - 1
+            # Check if previous year had 53 weeks
+            if _has_53_weeks(target_year):
+                target_week_num = 53 + target_week_num
+            else:
+                target_week_num = 52 + target_week_num
+            
+            # Exclude week 53
+            if target_week_num == 53:
+                target_week_num = 52
+                i += 1
+                continue
+        
+        week_str = f"{target_year}-{target_week_num:02d}"
+        if week_str not in weeks_to_process:
+            weeks_to_process.append(week_str)
+        i += 1
+    
+    # Reverse to match chronological order (oldest first)
+    weeks_to_process = weeks_to_process[::-1]
+    
     # Get all unique categories and genders
     all_categories = set()
     all_genders = set(['MEN', 'WOMEN'])
     
-    for i in range(num_weeks):
-        # Calculate target week
-        target_week_num = week_num - num_weeks + 1 + i
-        target_year = year
-        
-        # Handle year rollover
-        if target_week_num <= 0:
-            target_year -= 1
-            target_week_num += 52
-        
-        week_str = f"{target_year}-{target_week_num:02d}"
-        
+    for week_str in weeks_to_process:
         # Filter data for this week
         week_df = online_df[online_df['iso_week'] == week_str].copy()
         
@@ -60,17 +88,7 @@ def calculate_category_sales_for_weeks(base_week: str, num_weeks: int, data_root
                     all_categories.add(str(cat))
     
     # Group by Gender and Product Category for each week
-    for i in range(num_weeks):
-        # Calculate target week
-        target_week_num = week_num - num_weeks + 1 + i
-        target_year = year
-        
-        # Handle year rollover
-        if target_week_num <= 0:
-            target_year -= 1
-            target_week_num += 52
-        
-        week_str = f"{target_year}-{target_week_num:02d}"
+    for week_str in weeks_to_process:
         
         try:
             # Filter data for this week
@@ -127,9 +145,19 @@ def calculate_category_sales_for_weeks(base_week: str, num_weeks: int, data_root
                     key = f"{gender}_{category}"
                     week_result['categories'][key] = revenue
             
-            # Get last year data
-            last_year = target_year - 1
-            last_year_week_str = f"{last_year}-{target_week_num:02d}"
+            # Get last year data (same week number, previous year)
+            week_year, week_week_num = week_str.split('-')
+            week_year = int(week_year)
+            week_week_num = int(week_week_num)
+            
+            last_year = week_year - 1
+            
+            # Check if last year had 53 weeks and we're trying to match week 53
+            if week_week_num == 53 and not _has_53_weeks(last_year):
+                # If last year doesn't have week 53, use week 52
+                last_year_week_str = f"{last_year}-52"
+            else:
+                last_year_week_str = f"{last_year}-{week_week_num:02d}"
             
             try:
                 last_year_df = online_df[online_df['iso_week'] == last_year_week_str].copy()

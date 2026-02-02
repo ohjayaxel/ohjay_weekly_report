@@ -14,7 +14,7 @@ import {
 import { useChartAnimations } from '@/contexts/ChartSettingsContext'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
-import { CartesianGrid, LabelList, Line, LineChart, XAxis } from 'recharts'
+import { CartesianGrid, LabelList, Line, LineChart, XAxis } from '@/lib/recharts'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'

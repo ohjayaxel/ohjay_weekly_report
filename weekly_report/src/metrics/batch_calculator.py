@@ -4,7 +4,7 @@ from typing import Dict, Any
 from pathlib import Path
 from loguru import logger
 
-from weekly_report.src.metrics.table1 import load_all_raw_data, calculate_table1_for_periods
+from weekly_report.src.metrics.table1 import load_all_raw_data, calculate_table1_for_periods_with_ytd
 from weekly_report.src.metrics.markets import calculate_top_markets_for_weeks
 from weekly_report.src.metrics.online_kpis import calculate_online_kpis_for_weeks
 from weekly_report.src.metrics.contribution import calculate_contribution_for_weeks
@@ -79,9 +79,9 @@ def calculate_all_metrics(base_week: str, data_root: Path, num_weeks: int = 8) -
     }
     
     try:
-        # 1. Calculate periods and table1 metrics
-        logger.info("Calculating periods and table1 metrics...")
-        metrics_data = calculate_table1_for_periods(periods, data_root)
+        # 1. Calculate periods and table1 metrics (WITH YTD)
+        logger.info("Calculating periods and table1 metrics with YTD...")
+        metrics_data = calculate_table1_for_periods_with_ytd(periods, data_root)
         results['metrics'] = metrics_data
         
         # 2. Calculate top markets

@@ -1,18 +1,27 @@
 """FastAPI routes for weekly report API."""
 
-from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
+import os
+from pathlib import Path
+
+# Load .env from project root so SUPABASE_* and other vars are available before any request
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+if _env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_path)
+
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
+import json
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
-from pathlib import Path
 import tempfile
-import os
 import shutil
 from datetime import datetime
 from loguru import logger
 import pandas as pd
 import pandas as pd
+import hashlib
 
 from weekly_report.src.periods.calculator import get_periods_for_week, get_week_date_range, get_ytd_periods_for_week, validate_iso_week
 from weekly_report.src.metrics.table1 import calculate_table1_for_periods, calculate_table1_for_periods_with_ytd
@@ -40,6 +49,8 @@ from weekly_report.src.metrics.contribution_returning_total_per_country import c
 from weekly_report.src.metrics.total_contribution_per_country import calculate_total_contribution_per_country_for_weeks
 from weekly_report.src.metrics.batch_calculator import calculate_all_metrics
 from weekly_report.src.pdf.table1_builder import build_table1_pdf
+# Note: weekly_reports_builder not available, using Puppeteer-based approach instead
+# from weekly_report.src.pdf.weekly_reports_builder import build_weekly_reports_pdf
 from weekly_report.src.cache.manager import metrics_cache, raw_data_cache
 from weekly_report.src.config import load_config
 from weekly_report.src.utils.file_metadata import extract_file_metadata
@@ -333,6 +344,60 @@ class BatchMetricsResponse(BaseModel):
     total_contribution_per_country: List[Any]
 
 
+# Helper function to read metrics from Supabase cache
+def get_metrics_from_supabase(base_week: str, metric_key: str = None):
+    """
+    Read metrics from Supabase cache if available and file hashes match.
+    
+    Args:
+        base_week: ISO week string like '2025-42'
+        metric_key: Optional key to extract from metrics dict (e.g., 'markets', 'kpis')
+        
+    Returns:
+        Tuple (found: bool, data: dict or None)
+    """
+    try:
+        from weekly_report.src.adapters.supabase_client import get_supabase_client
+        from weekly_report.src.export.weekly_reports import reconstruct_metrics_from_supabase
+        from weekly_report.src.utils.file_hashes import get_file_hashes_for_week, hashes_match
+        from weekly_report.src.config import load_config
+        
+        supabase = get_supabase_client()
+        if not supabase:
+            return False, None
+        
+        try:
+            cached_result = supabase.table("weekly_report_metrics").select("*").eq("base_week", base_week).limit(1).execute()
+            if cached_result.data and len(cached_result.data) > 0:
+                cached_row = cached_result.data[0]
+                config = load_config(week=base_week)
+                current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                
+                stored_hashes = cached_row.get("file_hashes")
+                if stored_hashes and isinstance(stored_hashes, str):
+                    import json
+                    stored_hashes = json.loads(stored_hashes)
+                elif isinstance(stored_hashes, dict):
+                    pass
+                else:
+                    stored_hashes = {}
+                
+                if hashes_match(stored_hashes, current_file_hashes):
+                    metrics_dict = reconstruct_metrics_from_supabase(cached_row)
+                    if metric_key:
+                        if metric_key in metrics_dict:
+                            return True, metrics_dict[metric_key]
+                        else:
+                            return False, None
+                    return True, metrics_dict
+        except Exception as e:
+            logger.debug(f"Error reading from Supabase cache: {e}")
+    except ImportError:
+        logger.debug("Supabase client not available")
+    
+    return False, None
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Weekly Report API",
@@ -340,10 +405,48 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Configure logging to file
+log_file = Path("backend.log")
+logger.add(
+    str(log_file),
+    rotation="10 MB",
+    retention="7 days",
+    level="INFO",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+    backtrace=True,
+    diagnose=True
+)
+logger.info("Backend logging configured. Logs will be written to backend.log")
+
 # Add CORS middleware
+# Allow localhost for development and Vercel domains for production
+import os
+cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+]
+
+# Add Vercel domain if provided via environment variable
+vercel_url = os.getenv("VERCEL_URL")
+if vercel_url:
+    # Vercel provides URL without protocol, add https
+    if not vercel_url.startswith("http"):
+        cors_origins.append(f"https://{vercel_url}")
+    else:
+        cors_origins.append(vercel_url)
+
+# Also allow custom frontend URL if set
+frontend_url = os.getenv("FRONTEND_URL")
+if frontend_url:
+    cors_origins.append(frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:3002", "http://127.0.0.1:3002"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -394,6 +497,82 @@ async def get_periods(base_week: str = Query(..., description="Base ISO week lik
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# New: Actuals aggregated per market (for Budget Markets caching)
+@app.get("/api/actuals-markets")
+async def get_actuals_markets(week: str = Query(...)):
+    """Aggregate actuals per Market with total gross revenue and total orders."""
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+
+        # Use compute function to handle raw Qlik data correctly
+        from weekly_report.src.compute.budget import compute_actuals_markets_detailed
+        result = compute_actuals_markets_detailed(week)
+        
+        # Check if there's an error
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        # Aggregate per market from detailed results
+        markets = result.get("markets", [])
+        totals = result.get("totals", {})
+        metrics = result.get("metrics", [])
+        
+        # Shape to columns/sample_data format
+        candidate_cols = [
+            "Total Gross Revenue", "Total Net Revenue", "Returns", "Total Returns",
+            "Total Orders", "Total Customers",
+            "Returning Gross Revenue", "Returning Net Revenue", "Returning Returns", 
+            "Returning Orders", "Returning Customers",
+            "New Gross Revenue", "New Net Revenue", "New Returns", "New Orders", "New Customers",
+        ]
+        agg_cols = [c for c in candidate_cols if c in metrics]
+        
+        sample_data = []
+        for market in markets:
+            market_totals = totals.get(market, {})
+            row = {"Market": market}
+            for col in agg_cols:
+                row[col] = market_totals.get(col, 0.0)
+            sample_data.append(row)
+        
+        # Sort by first metric (descending)
+        if agg_cols and sample_data:
+            sample_data.sort(key=lambda x: x.get(agg_cols[0], 0.0), reverse=True)
+        
+        columns = ["Market"] + agg_cols
+        return {"columns": columns, "sample_data": sample_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error aggregating actuals per market: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# New: Actuals detailed per Market and Month (for Budget Markets detailed views)
+@app.get("/api/actuals-markets-detailed")
+async def get_actuals_markets_detailed(week: str = Query(...)):
+    """Aggregate actuals per Market and Month with the same metrics derivations used in general."""
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+
+        # Use compute function to handle raw Qlik data correctly
+        from weekly_report.src.compute.budget import compute_actuals_markets_detailed
+        result = compute_actuals_markets_detailed(week)
+        
+        # Check if there's an error
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error aggregating actuals per market detailed: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.get("/api/metrics/table1", response_model=MetricsResponse)
 async def get_table1_metrics(
     base_week: str = Query(..., description="Base ISO week like '2025-42'"),
@@ -415,7 +594,45 @@ async def get_table1_metrics(
             if period not in valid_periods:
                 raise HTTPException(status_code=400, detail=f"Invalid period: {period}")
         
-        # Check cache first
+        # Try to read from Supabase first
+        try:
+            from weekly_report.src.adapters.supabase_client import get_supabase_client
+            from weekly_report.src.export.weekly_reports import reconstruct_metrics_from_supabase
+            from weekly_report.src.utils.file_hashes import get_file_hashes_for_week, hashes_match
+            
+            supabase = get_supabase_client()
+            if supabase:
+                try:
+                    cached_result = supabase.table("weekly_report_metrics").select("*").eq("base_week", base_week).limit(1).execute()
+                    if cached_result.data and len(cached_result.data) > 0:
+                        cached_row = cached_result.data[0]
+                        config = load_config(week=base_week)
+                        current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                        
+                        stored_hashes = cached_row.get("file_hashes")
+                        if stored_hashes and isinstance(stored_hashes, str):
+                            import json
+                            stored_hashes = json.loads(stored_hashes)
+                        elif isinstance(stored_hashes, dict):
+                            pass
+                        else:
+                            stored_hashes = {}
+                        
+                        if hashes_match(stored_hashes, current_file_hashes):
+                            metrics_dict = reconstruct_metrics_from_supabase(cached_row)
+                            if "metrics" in metrics_dict:
+                                cached_metrics = metrics_dict["metrics"]
+                                # Filter to requested periods
+                                filtered_metrics = {k: v for k, v in cached_metrics.items() if k in requested_periods}
+                                if not include_ytd:
+                                    logger.info(f"✅ Returning table1 metrics from Supabase for {base_week}")
+                                    return MetricsResponse(periods=filtered_metrics)
+                except Exception as cache_error:
+                    logger.debug(f"Could not read from Supabase cache: {cache_error}")
+        except ImportError:
+            logger.debug("Supabase client not available, skipping cache check")
+        
+        # Check in-memory cache
         cached_result = metrics_cache.get(base_week, requested_periods)
         if cached_result and not include_ytd:
             return MetricsResponse(periods=cached_result)
@@ -500,20 +717,49 @@ async def download_file(filename: str):
             raise HTTPException(status_code=400, detail="Only PDF files are allowed")
         
         # Look for file in reports directory
+        # Use output_root (defaults to ./reports) instead of data_root/reports
         config = load_config()
-        reports_path = Path(config.data_root) / "reports"
+        reports_path = config.output_root
         
-        # Find the file
+        # Try to extract week from filename (e.g., weekly_reports_2025-44.pdf -> 2025-44)
+        week_from_filename = None
+        if 'weekly_reports_' in filename:
+            try:
+                # Extract week from filename like "weekly_reports_2025-44.pdf"
+                week_part = filename.replace('weekly_reports_', '').replace('.pdf', '')
+                if validate_iso_week(week_part):
+                    week_from_filename = week_part
+            except:
+                pass
+        
+        # If we have a week, check that specific week's directory first
         file_path = None
-        for subdir in reports_path.iterdir():
-            if subdir.is_dir():
-                potential_file = subdir / filename
-                if potential_file.exists():
-                    file_path = potential_file
-                    break
+        if week_from_filename:
+            specific_path = reports_path / week_from_filename / filename
+            if specific_path.exists():
+                file_path = specific_path
+                logger.info(f"Found file at specific week path: {file_path}")
+        
+        # If not found, search all subdirectories
+        if not file_path and reports_path.exists():
+            for subdir in reports_path.iterdir():
+                if subdir.is_dir():
+                    potential_file = subdir / filename
+                    if potential_file.exists():
+                        file_path = potential_file
+                        logger.info(f"Found file in subdirectory: {file_path}")
+                        break
+        
+        # Also check root reports directory
+        if not file_path:
+            root_file = reports_path / filename
+            if root_file.exists():
+                file_path = root_file
+                logger.info(f"Found file in root reports directory: {file_path}")
         
         if not file_path:
-            raise HTTPException(status_code=404, detail="File not found")
+            logger.error(f"File not found: {filename}. Searched in: {reports_path}")
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
         
         return FileResponse(
             path=str(file_path),
@@ -521,10 +767,680 @@ async def download_file(filename: str):
             media_type='application/pdf'
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
+# Weekly Reports PDF endpoint removed
+async def generate_weekly_reports_pdf(request: GeneratePDFRequest):
+    """Generate a combined Weekly Reports PDF using Puppeteer (replaces screenshot-based approach)."""
+    async def generate_with_progress():
+        """Generator function that yields progress updates."""
+        try:
+            if not validate_iso_week(request.base_week):
+                yield f"data: {json.dumps({'error': f'Invalid ISO week format: {request.base_week}'})}\n\n"
+                return
+
+            config = load_config(week=request.base_week)
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+            logger.info(f"Starting PDF generation using Puppeteer for {request.base_week}")
+            logger.info(f"Frontend URL: {frontend_url}")
+
+            # Define pages to capture
+            pages_to_capture = [
+                {'name': 'Summary', 'step': 4},
+                {'name': 'Top Markets', 'step': 5},
+                {'name': 'Online KPIs', 'step': 6}
+            ]
+            total_steps = 8  # Starting + Initializing + Loading page + 3 pages + Combining + Complete
+            
+            # Send initial progress
+            initial_progress = {
+                'step': 'starting',
+                'stepNumber': 1,
+                'totalSteps': total_steps,
+                'message': 'Starting PDF generation...',
+                'currentPage': None,
+                'percentage': 0
+            }
+            yield f"data: {json.dumps(initial_progress)}\n\n"
+            
+            # Create a queue to collect progress updates
+            import asyncio
+            progress_queue = asyncio.Queue()
+            
+            async def progress_callback_async(progress_data):
+                """Async progress callback that puts data in queue."""
+                await progress_queue.put(progress_data)
+            
+            async def progress_callback_async_wrapper(progress_data):
+                """Async wrapper for progress callback that can be called from async context.
+                
+                This is called from screenshot_builder which runs in an async context,
+                so we can directly await the queue put.
+                """
+                try:
+                    await progress_queue.put(progress_data)
+                    logger.debug(f"Progress data queued: {progress_data.get('step', 'unknown')} - {progress_data.get('message', '')}")
+                except Exception as e:
+                    logger.warning(f"Error queuing progress data: {e}")
+                    # Fallback: just log the progress
+                    logger.info(f"Progress: {progress_data.get('message', 'Unknown')}")
+            
+            def progress_callback_sync(progress_data):
+                """Synchronous progress callback that schedules async callback.
+                
+                This is called from screenshot_builder which runs in an async context,
+                but progress_callback is defined as sync. We need to ensure the task
+                actually executes and puts data in the queue.
+                """
+                try:
+                    # Since we're already in an async context (inside generate_pdf),
+                    # we can directly schedule the async callback
+                    loop = asyncio.get_running_loop()
+                    if loop.is_running():
+                        # Create a task to put data in queue
+                        # Use ensure_future to ensure it runs
+                        task = asyncio.ensure_future(progress_callback_async_wrapper(progress_data))
+                        # Store task reference to prevent garbage collection
+                        if not hasattr(progress_callback_sync, '_tasks'):
+                            progress_callback_sync._tasks = []
+                        progress_callback_sync._tasks.append(task)
+                    else:
+                        # If loop is not running, use run_until_complete (shouldn't happen)
+                        loop.run_until_complete(progress_callback_async_wrapper(progress_data))
+                except RuntimeError:
+                    # No running loop, try to get default loop
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            task = asyncio.ensure_future(progress_callback_async_wrapper(progress_data))
+                            if not hasattr(progress_callback_sync, '_tasks'):
+                                progress_callback_sync._tasks = []
+                            progress_callback_sync._tasks.append(task)
+                        else:
+                            loop.run_until_complete(progress_callback_async_wrapper(progress_data))
+                    except Exception as e:
+                        logger.warning(f"Error in progress callback: {e}")
+                        # Fallback: just log the progress
+                        logger.info(f"Progress: {progress_data.get('message', 'Unknown')}")
+                except Exception as e:
+                    logger.warning(f"Error in progress callback: {e}")
+                    # Fallback: just log the progress
+                    logger.info(f"Progress: {progress_data.get('message', 'Unknown')}")
+            
+            # Start PDF generation using Puppeteer
+            async def generate_pdf():
+                try:
+                    import subprocess
+                    from pathlib import Path
+                    
+                    # Send initial progress
+                    await progress_queue.put({
+                        'step': 'initializing',
+                        'stepNumber': 2,
+                        'totalSteps': total_steps,
+                        'message': 'Initializing Puppeteer...',
+                        'currentPage': None,
+                        'percentage': 20
+                    })
+                    
+                    # Determine frontend directory
+                    current_file = Path(__file__)
+                    project_root = current_file.parent.parent.parent  # weekly_report -> project root
+                    frontend_dir = project_root / 'frontend'
+                    script_path = frontend_dir / 'scripts' / 'makeReportPdf.ts'
+
+                    logger.info(f"Looking for Puppeteer script at: {script_path}")
+                    logger.info(f"Script exists: {script_path.exists()}")
+
+                    if not script_path.exists():
+                        raise FileNotFoundError(f"Puppeteer script not found at {script_path}")
+
+                    # Set environment variables
+                    env = os.environ.copy()
+                    env["NEXT_PUBLIC_API_URL"] = frontend_url
+                    env["NEXT_PUBLIC_FRONTEND_URL"] = frontend_url
+                    env["FRONTEND_URL"] = frontend_url
+
+                    logger.info(f"Starting Puppeteer script: npx tsx {script_path} {request.base_week}")
+                    logger.info(f"Working directory: {frontend_dir}")
+
+                    # Send progress before starting process
+                    await progress_queue.put({
+                        'step': 'loading',
+                        'stepNumber': 3,
+                        'totalSteps': total_steps,
+                        'message': 'Starting Puppeteer process...',
+                        'currentPage': None,
+                        'percentage': 30
+                    })
+
+                    # Run Puppeteer script
+                    process = await asyncio.create_subprocess_exec(
+                        'npx', 'tsx', str(script_path), request.base_week,
+                        cwd=str(frontend_dir),
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+
+                    logger.info(f"Puppeteer process started with PID: {process.pid}")
+                    
+                    # Send progress after process starts
+                    await progress_queue.put({
+                        'step': 'loading',
+                        'stepNumber': 3,
+                        'totalSteps': total_steps,
+                        'message': 'Puppeteer process started, loading pages...',
+                        'currentPage': None,
+                        'percentage': 40
+                    })
+
+                    # Read stdout line by line to track progress
+                    import re
+                    current_page_index = 0
+                    stdout_lines = []
+                    
+                    # Send progress when we start reading output
+                    await progress_queue.put({
+                        'step': 'loading',
+                        'stepNumber': 3,
+                        'totalSteps': total_steps,
+                        'message': 'Reading Puppeteer output...',
+                        'currentPage': None,
+                        'percentage': 45
+                    })
+                    
+                    # Read stdout in real-time
+                    current_page_index = 0
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        
+                        line_str = line.decode('utf-8', errors='ignore').strip()
+                        if not line_str:  # Skip empty lines
+                            continue
+                        stdout_lines.append(line_str)
+                        logger.debug(f"Puppeteer stdout: {line_str}")
+                        
+                        # Send progress when we see first output
+                        if len(stdout_lines) == 1:
+                            await progress_queue.put({
+                                'step': 'loading',
+                                'stepNumber': 3,
+                                'totalSteps': total_steps,
+                                'message': 'Puppeteer is running...',
+                                'currentPage': None,
+                                'percentage': 50
+                            })
+                        
+                        # Log all output for debugging
+                        logger.debug(f"Puppeteer stdout line {len(stdout_lines)}: {line_str}")
+                        
+                        # Parse progress from Puppeteer output
+                        # Match patterns like: "📄 [1/2] Generating Summary page..." or "[1/2] Generating Summary page..."
+                        # Handle emojis - try multiple regex patterns
+                        page_match = None
+                        
+                        # Check for "Loading [Page] page..." messages
+                        loading_match = re.search(r'Loading\s+([A-Za-z\s]+?)\s+page', line_str, re.IGNORECASE)
+                        if loading_match:
+                            page_name = loading_match.group(1).strip()
+                            # Find which page this is by matching against known pages
+                            for idx, page_info in enumerate(pages_to_capture):
+                                if page_info['name'].lower() == page_name.lower():
+                                    page_num = idx + 1
+                                    total_pages = len(pages_to_capture)
+                                    current_page_index = idx
+                                    # Progress during loading: slightly less than generating
+                                    page_progress = 45 + (page_num - 1) * (35 / max(total_pages, 1)) - 3
+                                    await progress_queue.put({
+                                        'step': 'loading',
+                                        'stepNumber': 3 + page_num,
+                                        'totalSteps': total_steps,
+                                        'message': f'Loading {page_name} page ({page_num}/{total_pages})...',
+                                        'currentPage': page_name,
+                                        'percentage': int(page_progress)
+                                    })
+                                    break
+                        
+                        # Check for "Page loaded, waiting for content..." messages
+                        if 'page loaded' in line_str.lower() and 'waiting for content' in line_str.lower():
+                            # This is the first step after navigation
+                            if current_page_index < len(pages_to_capture):
+                                page_info = pages_to_capture[current_page_index]
+                                page_num = current_page_index + 1
+                                total_pages = len(pages_to_capture)
+                                page_progress = 45 + (page_num - 1) * (35 / max(total_pages, 1)) - 5
+                                await progress_queue.put({
+                                    'step': 'loading',
+                                    'stepNumber': 3 + page_num,
+                                    'totalSteps': total_steps,
+                                    'message': f'Navigating to {page_info["name"]} page ({page_num}/{total_pages})...',
+                                    'currentPage': page_info['name'],
+                                    'percentage': int(page_progress)
+                                })
+                        
+                        # Check for "content loaded" messages (more specific)
+                        content_loaded_match = re.search(r'([A-Za-z\s]+?)\s+content\s+loaded', line_str, re.IGNORECASE)
+                        if content_loaded_match:
+                            page_name = content_loaded_match.group(1).strip()
+                            for idx, page_info in enumerate(pages_to_capture):
+                                if page_info['name'].lower() == page_name.lower():
+                                    page_num = idx + 1
+                                    total_pages = len(pages_to_capture)
+                                    page_progress = 48 + (page_num - 1) * (35 / max(total_pages, 1))
+                                    await progress_queue.put({
+                                        'step': 'generating',
+                                        'stepNumber': 3 + page_num,
+                                        'totalSteps': total_steps,
+                                        'message': f'{page_name} content loaded ({page_num}/{total_pages})...',
+                                        'currentPage': page_name,
+                                        'percentage': int(page_progress)
+                                    })
+                                    break
+                        
+                        # Check for "Generating PDF for [Page]..." messages
+                        generating_pdf_match = re.search(r'Generating\s+PDF\s+for\s+([A-Za-z\s]+?)\.\.\.', line_str, re.IGNORECASE)
+                        if generating_pdf_match:
+                            page_name = generating_pdf_match.group(1).strip()
+                            for idx, page_info in enumerate(pages_to_capture):
+                                if page_info['name'].lower() == page_name.lower():
+                                    page_num = idx + 1
+                                    total_pages = len(pages_to_capture)
+                                    page_progress = 50 + (page_num - 1) * (35 / max(total_pages, 1))
+                                    await progress_queue.put({
+                                        'step': 'generating',
+                                        'stepNumber': 3 + page_num,
+                                        'totalSteps': total_steps,
+                                        'message': f'Generating PDF for {page_name} ({page_num}/{total_pages})...',
+                                        'currentPage': page_name,
+                                        'percentage': int(page_progress)
+                                    })
+                                    break
+                        
+                        # Try pattern 1: with spaces after brackets
+                        page_match = re.search(r'\[(\d+)/(\d+)\]\s+Generating\s+(.+?)\s+page', line_str)
+                        if not page_match:
+                            # Try pattern 2: more flexible spacing
+                            page_match = re.search(r'\[(\d+)/(\d+)\].*?Generating\s+(.+?)\s+page', line_str)
+                        if not page_match:
+                            # Try pattern 3: extract page name differently (handle emojis)
+                            page_match = re.search(r'\[(\d+)/(\d+)\].*?Generating\s+([A-Za-z\s]+?)\s+page', line_str)
+                        
+                        if page_match:
+                            page_num = int(page_match.group(1))
+                            total_pages = int(page_match.group(2))
+                            page_name = page_match.group(3).strip()
+                            
+                            # Update current_page_index based on parsed page number
+                            current_page_index = page_num - 1
+                            
+                            # Calculate progress based on page number
+                            # Steps: Starting(0%), Init(20%), Load(40%), Pages(45-80%), Combining(90%), Complete(100%)
+                            # Each page gets ~11.67% between 45% and 80% (35% / 3 pages)
+                            page_progress = 45 + (page_num - 1) * (35 / max(total_pages, 1))
+                            
+                            logger.info(f"✅ Parsed page progress: {page_name} ({page_num}/{total_pages})")
+                            await progress_queue.put({
+                                'step': 'generating',
+                                'stepNumber': 3 + page_num,  # Step 4 for page 1, Step 5 for page 2, Step 6 for page 3
+                                'totalSteps': total_steps,
+                                'message': f'Generating {page_name} page ({page_num}/{total_pages})...',
+                                'currentPage': page_name,
+                                'percentage': int(page_progress)
+                            })
+                        
+                        # Check for page PDF generated messages (with or without emoji)
+                        page_generated_match = None
+                        page_generated_match = re.search(r'\[(\d+)/(\d+)\]\s+(.+?)\s+page\s+generated', line_str, re.IGNORECASE)
+                        if not page_generated_match:
+                            # Try without explicit "page generated" text
+                            page_generated_match = re.search(r'\[(\d+)/(\d+)\]\s+(.+?)\s+generated\s+\d+\s+bytes', line_str, re.IGNORECASE)
+                        if page_generated_match:
+                            page_num = int(page_generated_match.group(1))
+                            total_pages = int(page_generated_match.group(2))
+                            page_name = page_generated_match.group(3).strip()
+                            
+                            # Progress slightly higher when page PDF is generated
+                            # Each page gets ~11.67% between 50% and 85% (35% / 3 pages)
+                            page_progress = 50 + (page_num - 1) * (35 / max(total_pages, 1))
+                            
+                            logger.info(f"✅ Parsed page generated: {page_name} ({page_num}/{total_pages})")
+                            await progress_queue.put({
+                                'step': 'generating',
+                                'stepNumber': 3 + page_num,
+                                'totalSteps': total_steps,
+                                'message': f'{page_name} page PDF generated ({page_num}/{total_pages})',
+                                'currentPage': page_name,
+                                'percentage': int(page_progress)
+                            })
+                        
+                        # Check for combining messages (with or without emoji)
+                        if 'Combining' in line_str and ('pages' in line_str.lower() or 'PDF' in line_str):
+                            await progress_queue.put({
+                                'step': 'combining',
+                                'stepNumber': total_steps - 1,
+                                'totalSteps': total_steps,
+                                'message': 'Combining pages into final PDF...',
+                                'currentPage': None,
+                                'percentage': 90
+                            })
+                        
+                        # Check for final success message
+                        if 'PDF generated successfully' in line_str:
+                            await progress_queue.put({
+                                'step': 'complete',
+                                'stepNumber': total_steps,
+                                'totalSteps': total_steps,
+                                'message': 'PDF generation complete!',
+                                'currentPage': None,
+                                'percentage': 100
+                            })
+                    
+                    # Read stderr in parallel while waiting for process
+                    stderr_lines = []
+                    async def read_stderr():
+                        while True:
+                            line = await process.stderr.readline()
+                            if not line:
+                                break
+                            stderr_line = line.decode('utf-8', errors='ignore').strip()
+                            if stderr_line:
+                                stderr_lines.append(stderr_line)
+                                logger.warning(f"Puppeteer stderr: {stderr_line}")
+                    
+                    # Start reading stderr
+                    stderr_task = asyncio.create_task(read_stderr())
+                    
+                    # Wait for process to complete
+                    await process.wait()
+                    
+                    # Wait a bit for stderr to finish reading
+                    try:
+                        await asyncio.wait_for(stderr_task, timeout=2.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("Stderr reading timed out, continuing...")
+
+                    # Log script output for debugging
+                    if stdout_lines:
+                        stdout_text = '\n'.join(stdout_lines)
+                        logger.info(f"Puppeteer script stdout: {stdout_text}")
+                    if stderr_lines:
+                        stderr_text = '\n'.join(stderr_lines)
+                        logger.warning(f"Puppeteer script stderr: {stderr_text}")
+
+                    logger.info(f"Puppeteer process finished with return code: {process.returncode}")
+
+                    if process.returncode != 0:
+                        # Check if there's a timeout error in stderr
+                        timeout_error = False
+                        if stderr_lines:
+                            for line in stderr_lines:
+                                if 'TimeoutError' in line or 'timeout' in line.lower():
+                                    timeout_error = True
+                                    break
+                        
+                        if timeout_error:
+                            error_msg = "PDF generation timed out. The page took too long to load. Please try again or check if the frontend server is running properly."
+                        else:
+                            stderr_text = '\n'.join(stderr_lines) if stderr_lines else 'Unknown error'
+                            error_msg = f"Puppeteer script failed: {stderr_text}"
+                        
+                        logger.error(error_msg)
+                        
+                        # Send error to progress queue
+                        await progress_queue.put({
+                            'step': 'error',
+                            'stepNumber': 0,
+                            'totalSteps': total_steps,
+                            'message': error_msg,
+                            'currentPage': None,
+                            'percentage': 0,
+                            'error': error_msg
+                        })
+                        
+                        raise RuntimeError(error_msg)
+
+                    # Determine output path - use absolute path
+                    pdf_path = config.output_root.resolve() / request.base_week / 'weekly-report.pdf'
+                    
+                    logger.info(f"Checking for PDF at: {pdf_path}")
+                    logger.info(f"PDF path exists: {pdf_path.exists()}")
+                    
+                    if not pdf_path.exists():
+                        # Wait a bit more - PDF might still be generating
+                        import time
+                        for i in range(5):
+                            time.sleep(1)
+                            if pdf_path.exists():
+                                break
+                            logger.info(f"Waiting for PDF... ({i+1}/5)")
+                        
+                        if not pdf_path.exists():
+                            # List directory contents for debugging
+                            week_dir = config.output_root.resolve() / request.base_week
+                            if week_dir.exists():
+                                files = list(week_dir.glob('*'))
+                                logger.error(f"Files in {week_dir}: {[f.name for f in files]}")
+                            raise FileNotFoundError(f"PDF file not found at expected path: {pdf_path} (absolute: {pdf_path.resolve()})")
+
+                    # Only send complete result if we haven't already sent it from stdout parsing
+                    # Check if we already sent a complete message
+                    final_result_sent = False
+                    for line in stdout_lines:
+                        if 'PDF generated successfully' in line:
+                            final_result_sent = True
+                            break
+                    
+                    # If we didn't send complete from stdout, send it now
+                    if not final_result_sent:
+                        await progress_queue.put({
+                            'step': 'complete',
+                            'stepNumber': total_steps,
+                            'totalSteps': total_steps,
+                            'message': 'PDF generation complete!',
+                            'currentPage': None,
+                            'percentage': 100,
+                            'result': {
+                                'success': True,
+                                'file_path': str(pdf_path),
+                                'download_url': f"/api/download/{pdf_path.name}",
+                            }
+                        })
+                    else:
+                        # Just send the result part if we already sent complete
+                        await progress_queue.put({
+                            'step': 'complete',
+                            'stepNumber': total_steps,
+                            'totalSteps': total_steps,
+                            'message': 'PDF generation complete!',
+                            'currentPage': None,
+                            'percentage': 100,
+                            'result': {
+                                'success': True,
+                                'file_path': str(pdf_path),
+                                'download_url': f"/api/download/{pdf_path.name}",
+                            }
+                        })
+                except Exception as e:
+                    logger.error(f"❌ Error building PDF with Puppeteer: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    error_msg = str(e)
+                    await progress_queue.put({
+                        'step': 'error',
+                        'stepNumber': 0,
+                        'totalSteps': total_steps,
+                        'message': f'Error: {error_msg}',
+                        'currentPage': None,
+                        'percentage': 0,
+                        'error': error_msg,
+                        'result': None
+                    })
+            
+            # Start PDF generation task
+            pdf_task = asyncio.create_task(generate_pdf())
+            
+            # Initialize task list for progress callback
+            progress_callback_sync._tasks = []
+            
+            # Yield progress updates as they come in
+            result_received = False
+            logger.info("📊 Starting progress update loop...")
+            while True:
+                try:
+                    # Wait for progress update with shorter timeout to check if task is still running
+                    try:
+                        logger.debug(f"⏳ Waiting for progress update from queue (timeout: 10s)...")
+                        progress_data = await asyncio.wait_for(progress_queue.get(), timeout=10.0)
+                        logger.info(f"📨 Received progress update: {progress_data.get('step')} - {progress_data.get('message')} ({progress_data.get('percentage')}%)")
+                    except asyncio.TimeoutError:
+                        # Check if task is still running
+                        logger.debug(f"⏱️ Timeout waiting for progress, checking task status...")
+                        if pdf_task.done():
+                            # Task completed - check if it succeeded or failed
+                            try:
+                                await pdf_task  # This will raise exception if task failed
+                                # Task succeeded but we didn't get final progress - wait a bit more
+                                try:
+                                    progress_data = await asyncio.wait_for(progress_queue.get(), timeout=3.0)
+                                except asyncio.TimeoutError:
+                                    # Task done but no progress - send error
+                                    logger.error("Task completed but no progress received")
+                                    yield f"data: {json.dumps({'error': 'PDF generation task completed but no progress received', 'step': 'error'})}\n\n"
+                                    break
+                            except Exception as task_error:
+                                # Task failed - send error
+                                logger.error(f"PDF task failed: {task_error}")
+                                yield f"data: {json.dumps({'error': str(task_error), 'step': 'error'})}\n\n"
+                                break
+                        else:
+                            # Task still running, send a heartbeat to show we're still alive
+                            heartbeat = {
+                                'step': 'processing',
+                                'stepNumber': 3,
+                                'totalSteps': total_steps,
+                                'message': 'Puppeteer is processing...',
+                                'currentPage': None,
+                                'percentage': 45
+                            }
+                            yield f"data: {json.dumps(heartbeat)}\n\n"
+                            continue
+                    
+                    # Yield the progress update
+                    yield f"data: {json.dumps(progress_data)}\n\n"
+                    
+                    # If we got an error, we're done (error will be thrown on frontend)
+                    if progress_data.get('step') == 'error':
+                        # Error step - break immediately so frontend can handle it
+                        logger.info("✅ Error step received, ending stream")
+                        break
+                    
+                    # If we got a result/complete with result, we're done
+                    if progress_data.get('step') == 'complete':
+                        # Check if result is included
+                        if progress_data.get('result'):
+                            logger.info(f"✅ Complete step received with result: {progress_data.get('result')}")
+                            result_received = True
+                            break
+                        else:
+                            logger.warning("⚠️ Complete step received but no result - waiting for more data...")
+                            # Continue waiting in case result comes in next message
+                        
+                except Exception as e:
+                    logger.error(f"Error in progress loop: {e}")
+                    error_data = {
+                        'step': 'error',
+                        'stepNumber': 0,
+                        'totalSteps': total_steps,
+                        'message': f'Progress loop error: {str(e)}',
+                        'currentPage': None,
+                        'percentage': 0,
+                        'error': str(e),
+                        'result': None
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    break
+            
+            # Final check: if task completed but we didn't get result, try to get it from task
+            if not result_received and pdf_task.done():
+                try:
+                    pdf_path = await pdf_task
+                    # Task succeeded but result wasn't sent via progress - this shouldn't happen
+                    # as the task should always send result via progress_queue
+                    logger.warning("PDF task completed but no result received via progress queue")
+                    if not result_received:
+                        error_data = {
+                            'step': 'error',
+                            'stepNumber': 0,
+                            'totalSteps': total_steps,
+                            'message': 'PDF generation completed but no result received',
+                            'currentPage': None,
+                            'percentage': 0,
+                            'error': 'PDF generation completed but no result received',
+                            'result': None
+                        }
+                        yield f"data: {json.dumps(error_data)}\n\n"
+                except Exception as task_error:
+                    logger.error(f"PDF task failed: {task_error}")
+                    if not result_received:
+                        error_data = {
+                            'step': 'error',
+                            'stepNumber': 0,
+                            'totalSteps': total_steps,
+                            'message': f'PDF task error: {str(task_error)}',
+                            'currentPage': None,
+                            'percentage': 0,
+                            'error': str(task_error),
+                            'result': None
+                        }
+                        yield f"data: {json.dumps(error_data)}\n\n"
+            
+            # Wait for PDF task to complete (in case it's still running)
+            try:
+                await asyncio.wait_for(pdf_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("PDF task still running after progress loop ended")
+            except Exception as e:
+                logger.error(f"Error waiting for PDF task: {e}")
+                # Send error if task failed (only if we haven't already sent one)
+                if not result_received:
+                    error_data = {
+                        'step': 'error',
+                        'stepNumber': 0,
+                        'totalSteps': total_steps,
+                        'message': f'PDF task error: {str(e)}',
+                        'currentPage': None,
+                        'percentage': 0,
+                        'error': str(e),
+                        'result': None
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Error in PDF generation stream: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_with_progress(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @app.post("/api/cache/clear")
 async def clear_cache():
@@ -574,9 +1490,10 @@ async def debug_markets(
 @app.get("/api/markets/top", response_model=MarketsResponse)
 async def get_top_markets(
     base_week: str = Query(..., description="Base ISO week like '2025-42'"),
-    num_weeks: int = Query(8, description="Number of weeks to analyze")
+    num_weeks: int = Query(8, description="Number of weeks to analyze"),
+    recalculate: bool = Query(False, description="If true, skip Supabase cache and recalculate (for fresh Y/Y data)")
 ):
-    """Get top markets based on average Online Gross Revenue over last N weeks."""
+    """Get top markets based on average Online Gross Revenue over last N weeks. Reads from Supabase if available."""
     
     try:
         # Validate input
@@ -586,10 +1503,16 @@ async def get_top_markets(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        # Load config to get data root
-        config = load_config(week=base_week)
+        # Try to read from Supabase first (unless recalculate=true, to get fresh Y/Y for last-year weeks)
+        if not recalculate:
+            found, markets_data = get_metrics_from_supabase(base_week, "markets")
+            if found:
+                logger.info(f"✅ Returning markets from Supabase for {base_week}")
+                response = MarketsResponse(**markets_data)
+                return response
         
-        # Calculate top markets - use data_root not raw_data_path
+        # Calculate top markets (fresh or fallback)
+        config = load_config(week=base_week)
         markets_data = calculate_top_markets_for_weeks(base_week, num_weeks, config.data_root)
         
         # Debug: Log raw data
@@ -617,7 +1540,7 @@ async def get_online_kpis(
     base_week: str = Query(..., description="Base ISO week like '2025-42'"),
     num_weeks: int = Query(8, description="Number of weeks to analyze")
 ):
-    """Get Online KPIs for the last N weeks."""
+    """Get Online KPIs for the last N weeks. Reads from Supabase if available."""
     
     try:
         # Validate input
@@ -627,10 +1550,15 @@ async def get_online_kpis(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        # Load config to get data root
-        config = load_config(week=base_week)
+        # Try to read from Supabase first
+        found, kpis_data = get_metrics_from_supabase(base_week, "kpis")
+        if found:
+            logger.info(f"✅ Returning KPIs from Supabase for {base_week}")
+            response = OnlineKPIsResponse(**kpis_data)
+            return response
         
-        # Calculate Online KPIs - use data_root not raw_data_path
+        # Fallback: Calculate Online KPIs
+        config = load_config(week=base_week)
         kpis_data = calculate_online_kpis_for_weeks(base_week, num_weeks, config.data_root)
         
         response = OnlineKPIsResponse(**kpis_data)
@@ -691,8 +1619,7 @@ async def get_gender_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        gender_sales_data = calculate_gender_sales_for_weeks(base_week, num_weeks, data_path)
+        gender_sales_data = calculate_gender_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = GenderSalesResponse(
@@ -729,8 +1656,7 @@ async def get_men_category_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        men_category_sales_data = calculate_men_category_sales_for_weeks(base_week, num_weeks, data_path)
+        men_category_sales_data = calculate_men_category_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = MenCategorySalesResponse(
@@ -767,8 +1693,7 @@ async def get_women_category_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        women_category_sales_data = calculate_women_category_sales_for_weeks(base_week, num_weeks, data_path)
+        women_category_sales_data = calculate_women_category_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = WomenCategorySalesResponse(
@@ -805,9 +1730,7 @@ async def get_category_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        # Pass the week-specific data path
-        data_path = config.data_root / "raw" / base_week
-        category_sales_data = calculate_category_sales_for_weeks(base_week, num_weeks, data_path)
+        category_sales_data = calculate_category_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = CategorySalesResponse(
@@ -818,7 +1741,14 @@ async def get_category_sales(
             }
         )
         
-        return response
+        # Add cache headers for better performance
+        return Response(
+            content=response.model_dump_json(),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "public, max-age=600",  # Cache for 10 minutes
+            }
+        )
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -852,8 +1782,7 @@ async def get_top_products(
             raise HTTPException(status_code=400, detail=f"Customer type must be 'new' or 'returning'")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        top_products_data = calculate_top_products_for_weeks(base_week, num_weeks, data_path, top_n, customer_type)
+        top_products_data = calculate_top_products_for_weeks(base_week, num_weeks, config.data_root, top_n, customer_type)
         
         # Format response
         response = TopProductsResponse(
@@ -898,8 +1827,7 @@ async def get_top_products_by_gender(
             raise HTTPException(status_code=400, detail=f"Gender filter must be 'men' or 'women'")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        top_products_data = calculate_top_products_by_gender_for_weeks(base_week, num_weeks, data_path, gender_filter, top_n)
+        top_products_data = calculate_top_products_by_gender_for_weeks(base_week, num_weeks, config.data_root, gender_filter, top_n)
         
         # Format response
         response = TopProductsResponse(
@@ -936,8 +1864,7 @@ async def get_sessions_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        sessions_data = calculate_sessions_per_country_for_weeks(base_week, num_weeks, data_path)
+        sessions_data = calculate_sessions_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = SessionsPerCountryResponse(
@@ -974,8 +1901,7 @@ async def get_conversion_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        conversion_data = calculate_conversion_per_country_for_weeks(base_week, num_weeks, data_path)
+        conversion_data = calculate_conversion_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = ConversionPerCountryResponse(
@@ -1012,8 +1938,7 @@ async def get_new_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        new_customers_data = calculate_new_customers_per_country_for_weeks(base_week, num_weeks, data_path)
+        new_customers_data = calculate_new_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = NewCustomersPerCountryResponse(
@@ -1050,8 +1975,7 @@ async def get_returning_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        returning_customers_data = calculate_returning_customers_per_country_for_weeks(base_week, num_weeks, data_path)
+        returning_customers_data = calculate_returning_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = ReturningCustomersPerCountryResponse(
@@ -1088,8 +2012,7 @@ async def get_aov_new_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        aov_data = calculate_aov_new_customers_per_country_for_weeks(base_week, num_weeks, data_path)
+        aov_data = calculate_aov_new_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = AOVNewCustomersPerCountryResponse(
@@ -1126,8 +2049,7 @@ async def get_aov_returning_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        aov_data = calculate_aov_returning_customers_per_country_for_weeks(base_week, num_weeks, data_path)
+        aov_data = calculate_aov_returning_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = AOVReturningCustomersPerCountryResponse(
@@ -1164,8 +2086,7 @@ async def get_marketing_spend_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        spend_data = calculate_marketing_spend_per_country_for_weeks(base_week, num_weeks, data_path)
+        spend_data = calculate_marketing_spend_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = MarketingSpendPerCountryResponse(
@@ -1202,8 +2123,7 @@ async def get_ncac_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        ncac_data = calculate_ncac_per_country_for_weeks(base_week, num_weeks, data_path)
+        ncac_data = calculate_ncac_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = nCACPerCountryResponse(
@@ -1240,8 +2160,7 @@ async def get_contribution_new_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        contribution_data = calculate_contribution_new_per_country_for_weeks(base_week, num_weeks, data_path)
+        contribution_data = calculate_contribution_new_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionNewPerCountryResponse(
@@ -1278,8 +2197,7 @@ async def get_contribution_new_total_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        contribution_data = calculate_contribution_new_total_per_country_for_weeks(base_week, num_weeks, data_path)
+        contribution_data = calculate_contribution_new_total_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionNewTotalPerCountryResponse(
@@ -1316,8 +2234,7 @@ async def get_contribution_returning_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        contribution_data = calculate_contribution_returning_per_country_for_weeks(base_week, num_weeks, data_path)
+        contribution_data = calculate_contribution_returning_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionReturningPerCountryResponse(
@@ -1354,8 +2271,7 @@ async def get_contribution_returning_total_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        contribution_data = calculate_contribution_returning_total_per_country_for_weeks(base_week, num_weeks, data_path)
+        contribution_data = calculate_contribution_returning_total_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionReturningTotalPerCountryResponse(
@@ -1392,8 +2308,7 @@ async def get_total_contribution_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = load_config(week=base_week)
-        data_path = config.data_root / "raw" / base_week
-        contribution_data = calculate_total_contribution_per_country_for_weeks(base_week, num_weeks, data_path)
+        contribution_data = calculate_total_contribution_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
         response = TotalContributionPerCountryResponse(
@@ -1420,7 +2335,7 @@ async def get_batch_all_metrics(
     base_week: str = Query(..., description="Base ISO week like '2025-42'"),
     num_weeks: int = Query(8, description="Number of weeks to analyze")
 ):
-    """Get all metrics in a single batch request for optimal performance."""
+    """Get all metrics in a single batch request for optimal performance. Reads from Supabase if available."""
     
     try:
         if not validate_iso_week(base_week):
@@ -1429,13 +2344,164 @@ async def get_batch_all_metrics(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        # Try to read from Supabase first
+        try:
+            from weekly_report.src.adapters.supabase_client import get_supabase_client
+            from weekly_report.src.export.weekly_reports import reconstruct_metrics_from_supabase
+            from weekly_report.src.utils.file_hashes import get_file_hashes_for_week, hashes_match
+            
+            supabase = get_supabase_client()
+            if supabase:
+                try:
+                    cached_result = supabase.table("weekly_report_metrics").select("*").eq("base_week", base_week).limit(1).execute()
+                    if cached_result.data and len(cached_result.data) > 0:
+                        cached_row = cached_result.data[0]
+                        cached_num_weeks = cached_row.get("num_weeks", 8)
+                        
+                        # Check if num_weeks matches (if different, need to recompute)
+                        if cached_num_weeks == num_weeks:
+                            # Check file hashes
+                            config = load_config(week=base_week)
+                            current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                            
+                            stored_hashes = cached_row.get("file_hashes")
+                            if stored_hashes and isinstance(stored_hashes, str):
+                                import json
+                                stored_hashes = json.loads(stored_hashes)
+                            elif isinstance(stored_hashes, dict):
+                                pass  # Already dict
+                            else:
+                                stored_hashes = {}
+                            
+                            if hashes_match(stored_hashes, current_file_hashes):
+                                logger.info(f"✅ Returning cached metrics from Supabase for {base_week}")
+                                metrics_dict = reconstruct_metrics_from_supabase(cached_row)
+                                response = BatchMetricsResponse(**metrics_dict)
+                                return response
+                            else:
+                                logger.info(f"⚠️ File hashes changed for {base_week}, recomputing...")
+                except Exception as cache_error:
+                    logger.warning(f"Error reading from Supabase cache: {cache_error}, will compute")
+        except ImportError:
+            logger.debug("Supabase client not available, skipping cache check")
         
-        logger.info(f"Starting batch calculation for {base_week} with {num_weeks} weeks")
+        # Fallback: Compute metrics
+        config = load_config(week=base_week)
+        logger.info(f"Computing batch metrics for {base_week} with {num_weeks} weeks")
         all_metrics = calculate_all_metrics(base_week, config.data_root, num_weeks)
         
-        response = BatchMetricsResponse(**all_metrics)
-        return response
+        # Save to Supabase for future use (async, don't block)
+        try:
+            from weekly_report.src.adapters.supabase_client import get_supabase_client
+            supabase = get_supabase_client()
+            if supabase:
+                try:
+                    from weekly_report.src.export.weekly_reports import map_batch_metrics_to_supabase
+                    from weekly_report.src.utils.file_hashes import get_file_hashes_for_week
+                    current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                    weekly_metrics_row = map_batch_metrics_to_supabase(
+                        base_week=base_week,
+                        metrics=all_metrics,
+                        file_hashes=current_file_hashes,
+                        num_weeks=num_weeks
+                    )
+                    supabase.table("weekly_report_metrics").upsert(weekly_metrics_row, on_conflict="base_week").execute()
+                    logger.info(f"✅ Saved computed metrics to Supabase for {base_week}")
+                except Exception as save_error:
+                    logger.warning(f"Failed to save to Supabase (non-blocking): {save_error}")
+        except ImportError:
+            logger.debug("Supabase client not available, skipping save")
+        
+        # Convert to response format - handle type mismatches gracefully
+        try:
+            # Helper function to normalize data types
+            def normalize_field(value, expected_type, field_name=''):
+                if value is None:
+                    return [] if expected_type == list else {}
+                if isinstance(value, dict) and expected_type == list:
+                    # Check for common nested structures
+                    # MarketsResponse-like: {'markets': [...], 'period_info': {...}}
+                    if 'markets' in value:
+                        return value.get('markets', [])
+                    # KPIsResponse-like: {'kpis': [...], 'period_info': {...}}
+                    if 'kpis' in value:
+                        return value.get('kpis', [])
+                    # Other response-like structures: extract the main list field
+                    # Try to find a list value in the dict
+                    for key, val in value.items():
+                        if isinstance(val, list):
+                            logger.debug(f"Extracting list from {field_name} dict key '{key}'")
+                            return val
+                    # If no list found, return empty list
+                    logger.warning(f"Could not extract list from {field_name} dict, returning empty list")
+                    return []
+                if isinstance(value, list) and expected_type == dict:
+                    return {}  # Can't convert list to dict
+                return value
+            
+            # Enhance periods with date_ranges and ytd_periods (required by PeriodsResponse)
+            periods_dict = all_metrics.get('periods', {})
+            if isinstance(periods_dict, dict) and 'date_ranges' not in periods_dict:
+                # Calculate date_ranges and ytd_periods
+                from weekly_report.src.periods.calculator import get_week_date_range, get_ytd_periods_for_week
+                date_ranges = {}
+                for period_name, period_week in periods_dict.items():
+                    try:
+                        date_ranges[period_name] = get_week_date_range(period_week)
+                    except Exception as e:
+                        logger.warning(f"Could not get date range for {period_week}: {e}")
+                        date_ranges[period_name] = {
+                            'start': 'N/A',
+                            'end': 'N/A', 
+                            'display': 'N/A'
+                        }
+                ytd_periods = get_ytd_periods_for_week(base_week)
+                periods_dict = {
+                    **periods_dict,
+                    'date_ranges': date_ranges,
+                    'ytd_periods': ytd_periods
+                }
+            
+            # Normalize each field according to BatchMetricsResponse structure
+            response_dict = {
+                'periods': periods_dict,
+                'metrics': normalize_field(all_metrics.get('metrics'), dict, 'metrics'),
+                'markets': normalize_field(all_metrics.get('markets'), list, 'markets'),
+                'kpis': normalize_field(all_metrics.get('kpis'), list, 'kpis'),
+                'contribution': normalize_field(all_metrics.get('contribution'), list, 'contribution'),
+                'gender_sales': normalize_field(all_metrics.get('gender_sales'), list, 'gender_sales'),
+                'men_category_sales': normalize_field(all_metrics.get('men_category_sales'), list, 'men_category_sales'),
+                'women_category_sales': normalize_field(all_metrics.get('women_category_sales'), list, 'women_category_sales'),
+                'category_sales': normalize_field(all_metrics.get('category_sales'), dict, 'category_sales'),
+                'products_new': normalize_field(all_metrics.get('products_new'), dict, 'products_new'),
+                'products_gender': normalize_field(all_metrics.get('products_gender'), dict, 'products_gender'),
+                'sessions_per_country': normalize_field(all_metrics.get('sessions_per_country'), list, 'sessions_per_country'),
+                'conversion_per_country': normalize_field(all_metrics.get('conversion_per_country'), list, 'conversion_per_country'),
+                'new_customers_per_country': normalize_field(all_metrics.get('new_customers_per_country'), list, 'new_customers_per_country'),
+                'returning_customers_per_country': normalize_field(all_metrics.get('returning_customers_per_country'), list, 'returning_customers_per_country'),
+                'aov_new_customers_per_country': normalize_field(all_metrics.get('aov_new_customers_per_country'), list, 'aov_new_customers_per_country'),
+                'aov_returning_customers_per_country': normalize_field(all_metrics.get('aov_returning_customers_per_country'), list, 'aov_returning_customers_per_country'),
+                'marketing_spend_per_country': normalize_field(all_metrics.get('marketing_spend_per_country'), list, 'marketing_spend_per_country'),
+                'ncac_per_country': normalize_field(all_metrics.get('ncac_per_country'), list, 'ncac_per_country'),
+                'contribution_new_per_country': normalize_field(all_metrics.get('contribution_new_per_country'), list, 'contribution_new_per_country'),
+                'contribution_new_total_per_country': normalize_field(all_metrics.get('contribution_new_total_per_country'), list, 'contribution_new_total_per_country'),
+                'contribution_returning_per_country': normalize_field(all_metrics.get('contribution_returning_per_country'), list, 'contribution_returning_per_country'),
+                'contribution_returning_total_per_country': normalize_field(all_metrics.get('contribution_returning_total_per_country'), list, 'contribution_returning_total_per_country'),
+                'total_contribution_per_country': normalize_field(all_metrics.get('total_contribution_per_country'), list, 'total_contribution_per_country'),
+            }
+            
+            response = BatchMetricsResponse(**response_dict)
+            logger.info(f"✅ Successfully created BatchMetricsResponse for {base_week}")
+            return response
+        except Exception as validation_error:
+            logger.error(f"Error creating BatchMetricsResponse: {validation_error}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Metrics structure: {list(all_metrics.keys())}")
+            logger.error(f"Sample metrics content: {str(all_metrics)[:500]}")
+            # Return raw dict as fallback if validation fails
+            logger.warning(f"Returning raw metrics dict as fallback for {base_week}")
+            return all_metrics
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1490,10 +2556,100 @@ async def upload_file(
             shutil.copyfileobj(file.file, buffer)
         
         logger.info(f"File uploaded: {target_path}")
+        logger.info(f"DEBUG: file_type='{file_type}', week='{week}', filename='{file.filename}'")
+        
+        # Special handling for budget files: save to Supabase for reuse
+        if file_type == "budget":
+            logger.info(f"🔍 DEBUG: Entering budget file Supabase save logic")
+            try:
+                from weekly_report.src.adapters.supabase_client import get_supabase_client
+                supabase = get_supabase_client()
+                if supabase:
+                    # Extract year from week (ISO format: YYYY-WW)
+                    year = int(week.split("-")[0])
+                    
+                    # Read file content as text
+                    # Try UTF-8 first, fallback to latin-1 if needed
+                    try:
+                        with target_path.open("r", encoding="utf-8") as f:
+                            content = f.read()
+                    except UnicodeDecodeError:
+                        logger.warning(f"UTF-8 decode failed, trying latin-1 for {file.filename}")
+                        with target_path.open("r", encoding="latin-1") as f:
+                            content = f.read()
+                    
+                    logger.info(f"📦 Saving budget file to Supabase for year {year} (filename: {file.filename}, size: {len(content)} chars)")
+                    
+                    # Upsert to Supabase (unique per year)
+                    # Check if file already exists for this year
+                    existing = supabase.table("budget_files").select("id").eq("year", year).limit(1).execute()
+                    
+                    budget_data = {
+                        "year": year,
+                        "week": week,
+                        "filename": file.filename,
+                        "content": content
+                    }
+                    
+                    if existing.data and len(existing.data) > 0:
+                        # Update existing record
+                        budget_id = existing.data[0]["id"]
+                        result = supabase.table("budget_files").update(budget_data).eq("id", budget_id).execute()
+                        logger.info(f"✅ Updated budget file in Supabase for year {year} (id: {budget_id})")
+                    else:
+                        # Insert new record
+                        result = supabase.table("budget_files").insert(budget_data).execute()
+                        logger.info(f"✅ Inserted budget file to Supabase for year {year}")
+                    
+                    if result.data:
+                        logger.info(f"✅ Budget file saved to Supabase - {len(result.data)} row(s) affected")
+                    else:
+                        logger.warning(f"⚠️ Budget file save result has no data - result: {result}")
+                else:
+                    logger.error("❌ Supabase client not available - check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables")
+            except ImportError:
+                logger.debug("Supabase client not available, skipping budget file save")
+            except Exception as e:
+                import traceback
+                logger.error(f"❌ Failed to save budget file to Supabase: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.info(f"🔍 DEBUG: Skipping Supabase save - file_type='{file_type}' (not 'budget')")
         
         # Clear caches to ensure fresh data after upload
+        # Get the week's data path for cache invalidation
+        week_data_path_str = str(config.raw_data_path)
+        
+        # Clear the entire cache first (safest approach)
         raw_data_cache.clear()
-        logger.info("Cleared raw data cache after file upload")
+        
+        # Also try to clear cache using alternative path formats that might have been used
+        alternative_paths = [
+            week_data_path_str,
+            str(config.data_root / "raw" / week),
+            f"data/raw/{week}",
+            f"data/raw/{week}/{file_type}"
+        ]
+        
+        for alt_path in alternative_paths:
+            if alt_path in raw_data_cache.cache:
+                del raw_data_cache.cache[alt_path]
+                logger.info(f"Cleared raw data cache for path: {alt_path}")
+        
+        logger.info(f"Cleared raw data cache after file upload for week {week}")
+        
+        # Invalidate Supabase cache for this week (delete cached metrics)
+        # This ensures metrics are recomputed next time
+        try:
+            from weekly_report.src.adapters.supabase_client import get_supabase_client
+            supabase_client = get_supabase_client()
+            if supabase_client:
+                supabase_client.table("weekly_report_metrics").delete().eq("base_week", week).execute()
+                logger.info(f"✅ Invalidated Supabase cache for week {week} (will recompute on next access)")
+        except ImportError:
+            logger.debug("Supabase client not available, skipping cache invalidation")
+        except Exception as invalidation_error:
+            logger.warning(f"Failed to invalidate Supabase cache (non-blocking): {invalidation_error}")
         
         # Extract metadata (date range)
         metadata = extract_file_metadata(target_path, file_type)
@@ -1583,6 +2739,9 @@ def validate_file_dimensions(file_path: Path, file_type: str) -> Dict[str, Any]:
     return result
 
 
+# Cache for file dimensions validation results
+_dimensions_cache: Dict[str, Dict[str, Any]] = {}
+
 @app.get("/api/file-dimensions")
 async def get_file_dimensions(week: str = Query(...)):
     """Get validation status for required dimensions in data files."""
@@ -1593,7 +2752,39 @@ async def get_file_dimensions(week: str = Query(...)):
         config = load_config(week=week)
         raw_path = config.raw_data_path
         
+        # Check cache first
+        cache_key = f"{week}"
+        if cache_key in _dimensions_cache:
+            cached_result = _dimensions_cache[cache_key]
+            # Verify files haven't changed
+            cache_valid = True
+            for file_type in ["qlik", "dema_spend", "dema_gm2", "shopify", "budget"]:
+                type_path = raw_path / file_type
+                if type_path.exists():
+                    files = list(type_path.glob("*.*"))
+                    files = [f for f in files if not f.name.startswith('.')]
+                    if files:
+                        latest_file = max(files, key=lambda f: f.stat().st_mtime)
+                        cached_file_info = cached_result.get(file_type, {})
+                        if cached_file_info.get("filename") != latest_file.name or \
+                           cached_file_info.get("mtime") != latest_file.stat().st_mtime:
+                            cache_valid = False
+                            break
+            
+            if cache_valid:
+                # Return cached result (without mtime)
+                result = {}
+                for file_type, data in cached_result.items():
+                    result[file_type] = {
+                        "filename": data.get("filename"),
+                        "has_country": data.get("has_country"),
+                        "columns": data.get("columns", [])
+                    }
+                return result
+        
+        # Cache miss or invalid - compute result
         result = {}
+        file_hashes = []
         
         # Check each file type
         for file_type in ["qlik", "dema_spend", "dema_gm2", "shopify", "budget"]:
@@ -1613,6 +2804,15 @@ async def get_file_dimensions(week: str = Query(...)):
                         "has_country": validation["has_country"],
                         "columns": validation["columns"]
                     }
+                    # Cache with mtime for validation
+                    _dimensions_cache[cache_key] = _dimensions_cache.get(cache_key, {})
+                    _dimensions_cache[cache_key][file_type] = {
+                        "filename": latest_file.name,
+                        "mtime": latest_file.stat().st_mtime,
+                        "has_country": validation["has_country"],
+                        "columns": validation["columns"]
+                    }
+                    file_hashes.append(f"{file_type}:{latest_file.name}:{latest_file.stat().st_mtime}")
                 else:
                     result[file_type] = {
                         "filename": None,
@@ -1626,7 +2826,19 @@ async def get_file_dimensions(week: str = Query(...)):
                     "columns": []
                 }
         
-        return result
+        # Generate ETag and add caching headers
+        etag_content = f"{week}:{':'.join(file_hashes)}"
+        etag = hashlib.md5(etag_content.encode()).hexdigest()
+        
+        response = Response(
+            content=json.dumps(result),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "public, max-age=600",  # Cache for 10 minutes
+                "ETag": etag
+            }
+        )
+        return response
         
     except Exception as e:
         logger.error(f"Error validating file dimensions: {e}")
@@ -1644,6 +2856,7 @@ async def get_file_metadata(week: str = Query(...)):
         raw_path = config.raw_data_path
         
         metadata = {}
+        file_hashes = []
         for file_type in ["qlik", "dema_spend", "dema_gm2", "shopify"]:
             type_path = raw_path / file_type
             if type_path.exists():
@@ -1658,8 +2871,23 @@ async def get_file_metadata(week: str = Query(...)):
                         "filename": latest_file.name,
                         "uploaded_at": datetime.fromtimestamp(latest_file.stat().st_mtime).isoformat()
                     }
+                    # Add file hash for ETag
+                    file_hashes.append(f"{file_type}:{latest_file.name}:{latest_file.stat().st_mtime}")
         
-        return metadata
+        # Generate ETag from file metadata
+        etag_content = f"{week}:{':'.join(file_hashes)}"
+        etag = hashlib.md5(etag_content.encode()).hexdigest()
+        
+        # Create response with caching headers
+        response = Response(
+            content=json.dumps(metadata),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "public, max-age=600",  # Cache for 10 minutes
+                "ETag": etag
+            }
+        )
+        return response
         
     except HTTPException:
         raise
@@ -1676,14 +2904,9 @@ async def get_budget_data(week: str = Query(...)):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
         
         config = load_config(week=week)
-        budget_path = config.raw_data_path / "budget"
-        
-        if not budget_path.exists():
-            return {"error": "No budget data available for this week"}
-        
-        # Load budget data
+        # Note: load_data will check Supabase first, then fallback to local files
         from weekly_report.src.adapters.budget import load_data
-        budget_df = load_data(config.raw_data_path)
+        budget_df = load_data(config.raw_data_path, base_week=week)
         
         if budget_df.empty:
             return {"error": "Budget file is empty"}
@@ -1692,7 +2915,7 @@ async def get_budget_data(week: str = Query(...)):
         sample_dicts = []
         for _, row in budget_df.head(5).iterrows():
             row_dict = {}
-                for col, val in row.items():
+            for col, val in row.items():
                 # Check for NaN
                 if pd.isna(val):
                     row_dict[col] = None
@@ -1716,6 +2939,561 @@ async def get_budget_data(week: str = Query(...)):
     except Exception as e:
         logger.error(f"Error loading budget data: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load budget data: {str(e)}")
+
+
+# --- Discounts / Customer quality (no Supabase required) ---
+@app.get("/api/discounts/sales-yoy")
+async def get_discounts_sales_yoy(
+    base_week: str = Query(...),
+    num_weeks: int = Query(8),
+    segment: str = Query("all"),
+    expanded: bool = Query(False),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discount_sales_yoy_for_weeks
+        return calculate_discount_sales_yoy_for_weeks(base_week, num_weeks, config.data_root, segment, expanded)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts sales YoY: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts sales YoY")
+
+
+@app.get("/api/discounts/monthly-metrics")
+async def get_discounts_monthly_metrics(
+    base_week: str = Query(...),
+    months: int = Query(12),
+    segment: str = Query("all"),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discounts_monthly_metrics
+        return calculate_discounts_monthly_metrics(base_week, config.data_root, months, segment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts monthly metrics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts monthly metrics")
+
+
+@app.get("/api/discounts/summary")
+async def get_discounts_summary(
+    base_week: str = Query(...),
+    include_ytd: bool = Query(True),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discounts_summary_metrics
+        return calculate_discounts_summary_metrics(base_week, config.data_root, include_ytd)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts summary metrics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts summary metrics")
+
+
+@app.get("/api/discounts/ltm")
+async def get_discounts_ltm(
+    base_week: str = Query(...),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discounts_ltm_metrics
+        return calculate_discounts_ltm_metrics(base_week, config.data_root)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts LTM metrics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts LTM metrics")
+
+
+@app.get("/api/discounts/products")
+async def get_discounts_products(
+    base_week: str = Query(...),
+    num_weeks: int = Query(8),
+    segment: str = Query("all"),
+    granularity: str = Query("week"),
+    months: int = Query(12),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import (
+            calculate_discount_category_price_sales_for_weeks,
+            calculate_discount_category_price_sales_for_months,
+        )
+        if granularity == "month":
+            result = calculate_discount_category_price_sales_for_months(base_week, months, config.data_root, segment)
+            result["granularity"] = "month"
+            return result
+        result = calculate_discount_category_price_sales_for_weeks(base_week, num_weeks, config.data_root, segment)
+        result["granularity"] = "week"
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts products: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts products")
+
+
+@app.get("/api/discounts/categories")
+async def get_discounts_categories(
+    base_week: str = Query(...),
+    iso_week: str = Query(...),
+    segment: str = Query("all"),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discount_category_breakdown
+        return calculate_discount_category_breakdown(base_week, iso_week, config.data_root, segment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts categories: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts categories")
+
+
+@app.get("/api/discounts/categories-monthly")
+async def get_discounts_categories_monthly(
+    base_week: str = Query(...),
+    month: str = Query(...),
+    segment: str = Query("all"),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discount_category_breakdown_month
+        return calculate_discount_category_breakdown_month(base_week, month, config.data_root, segment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts categories monthly: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts categories monthly")
+
+
+@app.get("/api/discounts/category-countries")
+async def get_discounts_category_countries(
+    base_week: str = Query(...),
+    iso_week: str = Query(...),
+    category: str = Query(...),
+    segment: str = Query("all"),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discount_category_country_breakdown
+        return calculate_discount_category_country_breakdown(base_week, iso_week, category, config.data_root, segment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts category countries: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts category countries")
+
+
+@app.get("/api/discounts/category-countries-monthly")
+async def get_discounts_category_countries_monthly(
+    base_week: str = Query(...),
+    month: str = Query(...),
+    category: str = Query(...),
+    segment: str = Query("all"),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discount_category_country_breakdown_month
+        return calculate_discount_category_country_breakdown_month(base_week, month, category, config.data_root, segment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts category countries monthly: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts category countries monthly")
+
+
+@app.get("/api/discounts/category-series")
+async def get_discounts_category_series(
+    base_week: str = Query(...),
+    category: str = Query(...),
+    segment: str = Query("all"),
+    expanded: bool = Query(False),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.discounts_sales import calculate_discount_category_series
+        return calculate_discount_category_series(base_week, category, config.data_root, segment, expanded)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading discounts category series: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load discounts category series")
+
+
+@app.get("/api/customer-quality/scorecard")
+async def get_customer_quality_scorecard(
+    base_week: str = Query(...),
+    window_days: int = Query(180),
+    as_of_date: Optional[str] = Query(None),
+    baseline_months: int = Query(24),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.customer_discount_quality import (
+            DiscountQualityConfig,
+            build_quality_context,
+            compute_quality_scorecard,
+            compute_diagnostics,
+        )
+        cfg = DiscountQualityConfig(cohort_window_days=window_days)
+        order_df, first_orders, meta = build_quality_context(base_week, str(config.data_root), as_of_date=as_of_date)
+        if meta.get("error"):
+            raise HTTPException(status_code=404, detail=meta["error"])
+        as_of_dt = pd.to_datetime(meta.get("as_of_date"), errors="coerce")
+        if pd.isna(as_of_dt):
+            as_of_dt = pd.Timestamp.utcnow().normalize()
+        scorecard = compute_quality_scorecard(order_df, first_orders, as_of_date=as_of_dt, window_days=window_days, baseline_months=baseline_months)
+        diagnostics = compute_diagnostics(order_df)
+        return {**scorecard, "meta": meta, "diagnostics": diagnostics}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading customer quality scorecard: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load customer quality scorecard")
+
+
+@app.get("/api/customer-quality/discount-depth")
+async def get_customer_quality_discount_depth(
+    base_week: str = Query(...),
+    window_days: int = Query(180),
+    as_of_date: Optional[str] = Query(None),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.customer_discount_quality import (
+            build_quality_context,
+            compute_discount_depth,
+        )
+        order_df, first_orders, meta = build_quality_context(base_week, str(config.data_root), as_of_date=as_of_date)
+        if meta.get("error"):
+            raise HTTPException(status_code=404, detail=meta["error"])
+        as_of_dt = pd.to_datetime(meta.get("as_of_date"), errors="coerce")
+        if pd.isna(as_of_dt):
+            as_of_dt = pd.Timestamp.utcnow().normalize()
+        result = compute_discount_depth(order_df, first_orders, as_of_date=as_of_dt, window_days=window_days)
+        return {**result, "meta": meta}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading customer quality discount depth: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load customer quality discount depth")
+
+
+@app.get("/api/customer-quality/segments")
+async def get_customer_quality_segments(
+    base_week: str = Query(...),
+    window_days: int = Query(180),
+    as_of_date: Optional[str] = Query(None),
+    threshold_low: float = Query(0.2),
+    threshold_high: float = Query(0.8),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.customer_discount_quality import (
+            build_quality_context,
+            compute_segments,
+        )
+        order_df, first_orders, meta = build_quality_context(base_week, str(config.data_root), as_of_date=as_of_date)
+        if meta.get("error"):
+            raise HTTPException(status_code=404, detail=meta["error"])
+        as_of_dt = pd.to_datetime(meta.get("as_of_date"), errors="coerce")
+        if pd.isna(as_of_dt):
+            as_of_dt = pd.Timestamp.utcnow().normalize()
+        result = compute_segments(
+            order_df,
+            first_orders,
+            as_of_date=as_of_dt,
+            window_days=window_days,
+            threshold_low=threshold_low,
+            threshold_high=threshold_high,
+        )
+        return {**result, "meta": meta}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading customer quality segments: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load customer quality segments")
+
+
+@app.get("/api/customer-quality/pathways")
+async def get_customer_quality_pathways(
+    base_week: str = Query(...),
+    window_days: int = Query(180),
+    as_of_date: Optional[str] = Query(None),
+    threshold_low: float = Query(0.2),
+    threshold_high: float = Query(0.8),
+    baseline_months: int = Query(24),
+):
+    try:
+        if not validate_iso_week(base_week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=base_week)
+        from weekly_report.src.metrics.customer_discount_quality import (
+            build_quality_context,
+            compute_pathways,
+        )
+        order_df, first_orders, meta = build_quality_context(base_week, str(config.data_root), as_of_date=as_of_date)
+        if meta.get("error"):
+            raise HTTPException(status_code=404, detail=meta["error"])
+        as_of_dt = pd.to_datetime(meta.get("as_of_date"), errors="coerce")
+        if pd.isna(as_of_dt):
+            as_of_dt = pd.Timestamp.utcnow().normalize()
+        result = compute_pathways(
+            order_df,
+            first_orders,
+            as_of_date=as_of_dt,
+            window_days=window_days,
+            threshold_low=threshold_low,
+            threshold_high=threshold_high,
+            baseline_months=baseline_months,
+        )
+        return {**result, "meta": meta}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading customer quality pathways: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load customer quality pathways")
+
+
+def _parse_number(value: Any) -> float:
+    """Robust number parser for budget values with locale artifacts.
+    - Handles commas as thousands or decimal
+    - Removes spaces, percent signs
+    - Converts parentheses negatives
+    """
+    try:
+        if pd.isna(value):
+            return float('nan')
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip()
+        if s == '':
+            return float('nan')
+        # parentheses negative
+        if s.startswith('(') and s.endswith(')'):
+            s = '-' + s[1:-1]
+        # remove spaces and percents
+        s = s.replace(' ', '').replace('%', '')
+        # decide separators
+        if ',' in s and '.' in s:
+            # likely comma thousands, dot decimal
+            s = s.replace(',', '')
+        elif ',' in s and '.' not in s:
+            # if groups of 3 before comma -> thousands
+            parts = s.split(',')
+            if all(len(p) == 3 for p in parts[1:]):
+                s = ''.join(parts)
+            else:
+                s = s.replace(',', '.')
+        return float(s)
+    except Exception:
+        return float('nan')
+
+
+@app.get("/api/budget-debug")
+async def get_budget_debug(
+    week: str = Query(...),
+    month: str = Query(...),
+    metrics: str = Query("Returning Gross Revenue,New Gross Revenue")
+):
+    """Debug endpoint: show per-row values for selected month and metrics across filter stages."""
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        config = load_config(week=week)
+        from weekly_report.src.adapters.budget import load_data
+        df = load_data(config.raw_data_path, base_week=week)
+        df.columns = df.columns.str.strip()
+        if 'Month' not in df.columns:
+            raise HTTPException(status_code=400, detail="Budget file missing 'Month' column")
+        df['Month'] = df['Month'].astype(str).str.strip()
+        df['Market'] = df['Market'].astype(str).str.strip() if 'Market' in df.columns else ''
+
+        metric_list = [m.strip() for m in metrics.split(',') if m.strip()]
+        present_metrics = [m for m in metric_list if m in df.columns]
+
+        raw_subset = df[df['Month'] == month][['Month', 'Market', *present_metrics]].copy()
+
+        total_aliases = {"total", "all", "all markets", "grand total", "totals"}
+        filtered = raw_subset[~raw_subset['Market'].str.lower().isin(total_aliases)]
+        filtered = filtered[filtered['Market'].str.len() > 0]
+
+        # numeric stage
+        numeric = filtered.copy()
+        for col in present_metrics:
+            numeric[col] = numeric[col].map(_parse_number)
+
+        sums = {col: float(pd.to_numeric(numeric[col], errors='coerce').sum()) for col in present_metrics}
+
+        return {
+            'week': week,
+            'month': month,
+            'metrics': present_metrics,
+            'raw_rows': raw_subset.to_dict(orient='records'),
+            'after_filter_rows': filtered.to_dict(orient='records'),
+            'after_numeric_rows': numeric.to_dict(orient='records'),
+            'sums': sums,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"budget-debug failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/budget-general")
+async def get_budget_general(week: str = Query(...)):
+    """Aggregate budget metrics across all markets, summarized by Month.
+    Returns a pivot-friendly structure with metrics as rows and months as columns,
+    plus a Total column aggregating all months.
+    """
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        from weekly_report.src.compute.budget import compute_budget_general
+        result = compute_budget_general(week)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error aggregating budget general data: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to aggregate budget general: {str(e)}")
+
+
+@app.get("/api/actuals-general")
+async def get_actuals_general(week: str = Query(...)):
+    """Aggregate actuals across all markets by Month with same shape as budget-general."""
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+
+        # Use compute function instead of duplicating logic
+        from weekly_report.src.compute.budget import compute_actuals_general
+        
+        result = compute_actuals_general(week)
+        
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error aggregating actuals general: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to aggregate actuals general: {str(e)}")
+
+
+@app.get("/api/supabase/verify")
+async def supabase_verify_endpoint():
+    """
+    Verify Supabase connection step-by-step. No guesswork: returns exact status for each step.
+    Use this to confirm env vars, client creation, and a simple query work before running sync.
+    """
+    result = {
+        "env_file_loaded": False,
+        "SUPABASE_URL": "not_set",
+        "SUPABASE_SERVICE_ROLE_KEY": "not_set",
+        "key_length": 0,
+        "client_created": False,
+        "client_error": None,
+        "query_ok": False,
+        "query_error": None,
+        "table_row_count": None,
+    }
+    # 1) Env file
+    _env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    result["env_file_loaded"] = _env_path.exists()
+    # 2) Env vars (values never returned, only set/not_set and key length)
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    result["SUPABASE_URL"] = "set" if (url and url.strip()) else "not_set"
+    result["SUPABASE_SERVICE_ROLE_KEY"] = "set" if (key and key.strip()) else "not_set"
+    result["key_length"] = len(key) if key else 0
+    # 3) Client creation
+    client = None
+    try:
+        from weekly_report.src.adapters.supabase_client import get_supabase_client
+        client = get_supabase_client()
+        result["client_created"] = client is not None
+        if not client:
+            result["client_error"] = "get_supabase_client() returned None (check env vars or supabase package)"
+    except Exception as e:
+        result["client_error"] = str(e)
+    # 4) One simple query (proves connection and RLS)
+    if result["client_created"] and client is not None:
+        try:
+            r = client.table("weekly_report_metrics").select("base_week", count="exact").limit(1).execute()
+            result["query_ok"] = True
+            result["table_row_count"] = r.count if getattr(r, "count", None) is not None else (len(r.data) if r.data else 0)
+        except Exception as e:
+            result["query_error"] = str(e)
+    return result
+
+
+@app.post("/api/sync-supabase")
+async def sync_supabase_endpoint(
+    week: str = Query(..., description="ISO week format: YYYY-WW"),
+    num_weeks: int = Query(8, description="Number of weeks to analyze")
+):
+    """Trigger Supabase sync for the specified week."""
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+        
+        from weekly_report.src.sync.supabase_sync import sync_supabase_data
+        
+        result = sync_supabase_data(week, num_weeks=num_weeks)
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error", "Sync failed")
+            )
+        
+        return {
+            "success": True,
+            "week": week,
+            "row_counts": result.get("row_counts", {}),
+            "elapsed_seconds": result.get("elapsed_seconds", 0),
+            "sync_id": result.get("sync_id")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Supabase sync failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 
 if __name__ == "__main__":

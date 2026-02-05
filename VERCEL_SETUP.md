@@ -42,21 +42,44 @@ Säkerställ att Root Directory är `frontend` så att Vercel använder `fronten
 ### 2.3 Miljövariabler i Vercel
 Lägg till följande miljövariabler i Vercel Dashboard → Project Settings → Environment Variables:
 
-#### Obligatoriska:
+#### Obligatoriska (minst för att appen ska fungera):
 ```
 NEXT_PUBLIC_API_URL=https://din-backend-url.com
-NEXT_PUBLIC_SUPABASE_URL=https://ditt-supabase-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=ditt_anon_key_här
 ```
 
-#### Valfria (för development):
+#### Supabase (så att Vercel-appen läser cache från Supabase)
+Samma projekt som backend använder (samma URL och samma projekt i Supabase Dashboard):
+
+```
+NEXT_PUBLIC_SUPABASE_URL=https://ditt-supabase-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...   # anon public key från Supabase → Settings → API
+NEXT_PUBLIC_DISABLE_SUPABASE=false     # viktigt: false eller utelämna – annars används inte Supabase
+```
+
+- Om du **utelämnar** `NEXT_PUBLIC_DISABLE_SUPABASE` används Supabase när URL och anon key är satta.
+- Sätt **endast** `NEXT_PUBLIC_DISABLE_SUPABASE=true` om du medvetet vill stänga av Supabase (t.ex. bara API-läge).
+
+#### Valfria (för development/preview):
 ```
 NEXT_PUBLIC_API_URL=http://localhost:8000  # Endast för local dev
 ```
 
 **Viktigt**: 
 - `NEXT_PUBLIC_*` variabler är tillgängliga i frontend-koden
-- Lägg till samma variabler för Production, Preview och Development miljöer
+- Lägg till samma variabler för **Production**, **Preview** och **Development** om du vill ha Supabase i alla miljöer
+- Efter att du lagt till eller ändrat miljövariabler: **Redeploy** (Deployments → … → Redeploy) så att bygget får de nya värdena
+
+### 2.4 Koppla Supabase på Vercel (steg för steg)
+1. **Supabase-projekt klart** – Tabeller skapade med `supabase_schema.sql` (se SUPABASE_SETUP.md).
+2. **Vercel → Project → Settings → Environment Variables** – Lägg till:
+   - `NEXT_PUBLIC_SUPABASE_URL` = din Project URL (t.ex. `https://xxxxx.supabase.co`)
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = anon public key (Supabase Dashboard → Settings → API)
+   - `NEXT_PUBLIC_DISABLE_SUPABASE` = `false` (eller lämna bort – då används Supabase om URL och key är satta)
+3. **Välj miljö** – Sätt variablerna för Production (och eventuellt Preview/Development).
+4. **Redeploy** – Gå till Deployments → senaste deployment → … → Redeploy.
+5. **Verifiera** – Öppna din Vercel-URL → **Settings** i appen → klicka **Verifiera Supabase (backend)** om backend är igång; frontend visar "Supabase read: OK" när data laddas från Supabase.
+
+Om frontend fortfarande visar "Supabase: Disabled" eller "Not configured" – kontrollera att `NEXT_PUBLIC_DISABLE_SUPABASE` inte är `true` och att URL samt anon key är exakt som i Supabase Dashboard.
 
 ## Steg 3: Backend Deployment
 
@@ -113,8 +136,10 @@ Efter att backend är deployad:
 
 ### Problem: Supabase fungerar inte
 **Lösning**:
-- Kontrollera att `NEXT_PUBLIC_SUPABASE_URL` och `NEXT_PUBLIC_SUPABASE_ANON_KEY` är korrekta
-- Kontrollera RLS (Row Level Security) policies i Supabase
+- Kontrollera att `NEXT_PUBLIC_SUPABASE_URL` och `NEXT_PUBLIC_SUPABASE_ANON_KEY` är satta i Vercel Environment Variables
+- Sätt `NEXT_PUBLIC_DISABLE_SUPABASE=false` (eller ta bort variabeln) – annars används inte Supabase
+- Kontrollera RLS (Row Level Security) policies i Supabase (anon ska ha SELECT på t.ex. `weekly_report_metrics`, `budget_general`)
+- Efter ändring av env: redeploya så att bygget får nya värdena
 
 ### Problem: Build tar för lång tid
 **Lösning**: 

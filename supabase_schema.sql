@@ -147,60 +147,69 @@ ALTER TABLE sync_runs ENABLE ROW LEVEL SECURITY;
 -- Create policies for anon access (adjust based on your security needs)
 -- These policies allow read access for anonymous users (frontend)
 -- and full access for service role (backend)
+-- DROP IF EXISTS makes the script safe to run multiple times (idempotent)
 
--- Policy for weekly_report_metrics: Allow read for anon, full access for service role
+-- Policy for weekly_report_metrics
+DROP POLICY IF EXISTS "Allow anon read access" ON weekly_report_metrics;
+DROP POLICY IF EXISTS "Allow service role full access" ON weekly_report_metrics;
 CREATE POLICY "Allow anon read access" ON weekly_report_metrics
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON weekly_report_metrics
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for budget_files: Allow read for anon, full access for service role
+-- Policy for budget_files
+DROP POLICY IF EXISTS "Allow anon read access" ON budget_files;
+DROP POLICY IF EXISTS "Allow service role full access" ON budget_files;
 CREATE POLICY "Allow anon read access" ON budget_files
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON budget_files
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for budget_general: Allow read for anon, full access for service role
+-- Policy for budget_general
+DROP POLICY IF EXISTS "Allow anon read access" ON budget_general;
+DROP POLICY IF EXISTS "Allow service role full access" ON budget_general;
 CREATE POLICY "Allow anon read access" ON budget_general
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON budget_general
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for budget_general_totals: Allow read for anon, full access for service role
+-- Policy for budget_general_totals
+DROP POLICY IF EXISTS "Allow anon read access" ON budget_general_totals;
+DROP POLICY IF EXISTS "Allow service role full access" ON budget_general_totals;
 CREATE POLICY "Allow anon read access" ON budget_general_totals
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON budget_general_totals
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for budget_markets_detailed: Allow read for anon, full access for service role
+-- Policy for budget_markets_detailed
+DROP POLICY IF EXISTS "Allow anon read access" ON budget_markets_detailed;
+DROP POLICY IF EXISTS "Allow service role full access" ON budget_markets_detailed;
 CREATE POLICY "Allow anon read access" ON budget_markets_detailed
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON budget_markets_detailed
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for budget_markets_totals: Allow read for anon, full access for service role
+-- Policy for budget_markets_totals
+DROP POLICY IF EXISTS "Allow anon read access" ON budget_markets_totals;
+DROP POLICY IF EXISTS "Allow service role full access" ON budget_markets_totals;
 CREATE POLICY "Allow anon read access" ON budget_markets_totals
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON budget_markets_totals
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for weeks: Allow read for anon, full access for service role
+-- Policy for weeks
+DROP POLICY IF EXISTS "Allow anon read access" ON weeks;
+DROP POLICY IF EXISTS "Allow service role full access" ON weeks;
 CREATE POLICY "Allow anon read access" ON weeks
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON weeks
     FOR ALL USING (auth.role() = 'service_role');
 
--- Policy for sync_runs: Allow read for anon, full access for service role
+-- Policy for sync_runs
+DROP POLICY IF EXISTS "Allow anon read access" ON sync_runs;
+DROP POLICY IF EXISTS "Allow service role full access" ON sync_runs;
 CREATE POLICY "Allow anon read access" ON sync_runs
     FOR SELECT USING (true);
-
 CREATE POLICY "Allow service role full access" ON sync_runs
     FOR ALL USING (auth.role() = 'service_role');
 

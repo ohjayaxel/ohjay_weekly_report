@@ -324,12 +324,13 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
               step: 'metrics',
               stepNumber: 1,
               totalSteps: 27,
-              message: 'Supabase not configured (frontend) – loading from API...',
+              message: 'Supabase inte konfigurerad.',
               percentage: 5,
-              supabaseStatus: 'Supabase read: Not configured (check NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY)'
+              supabaseStatus: 'Supabase: Lägg till NEXT_PUBLIC_SUPABASE_URL och NEXT_PUBLIC_SUPABASE_ANON_KEY'
             }))
+            setError('Supabase är inte konfigurerad. Lägg till NEXT_PUBLIC_SUPABASE_URL och NEXT_PUBLIC_SUPABASE_ANON_KEY i miljövariablerna.')
           } else {
-            const supabaseData = await loadWeeklyReportMetricsFromSupabase(week, false)
+            const supabaseData = await loadWeeklyReportMetricsFromSupabase(week)
             if (supabaseData) {
               batchData = supabaseData
               batchMode = true
@@ -347,10 +348,11 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
                 step: 'metrics',
                 stepNumber: 1,
                 totalSteps: 27,
-                message: 'No data in Supabase for this week – loading from API...',
+                message: 'Ingen data för denna vecka i Supabase.',
                 percentage: 5,
-                supabaseStatus: prev?.supabaseStatus ? `${prev.supabaseStatus} · Read: No data` : 'Supabase read: No data (using API)'
+                supabaseStatus: prev?.supabaseStatus ? `${prev.supabaseStatus} · No data` : 'Supabase read: No data'
               }))
+              setError('Ingen data för denna vecka laddad än. Använd "Refresh all data" i Settings för att synka data till Supabase.')
             }
           }
         } catch (supabaseError) {
@@ -358,11 +360,12 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
             step: 'metrics',
             stepNumber: 1,
             totalSteps: 27,
-            message: 'Supabase read failed – loading from API...',
+            message: 'Kunde inte läsa från Supabase.',
             percentage: 5,
-            supabaseStatus: prev?.supabaseStatus ? `${prev.supabaseStatus} · Read: Failed` : 'Supabase read: Failed (using API)'
+            supabaseStatus: prev?.supabaseStatus ? `${prev.supabaseStatus} · Read: Failed` : 'Supabase read: Failed'
           }))
-          console.debug('Could not load from Supabase, will try API:', supabaseError)
+          setError('Kunde inte läsa från Supabase. Kontrollera nätverk och att projekt-URL samt anon-nyckel är korrekta.')
+          console.debug('Supabase read error:', supabaseError)
         }
       } else {
         setLoadingProgress(prev => ({
@@ -375,7 +378,8 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
         }))
       }
 
-      if (!batchData) {
+      // Only load from API when Supabase is disabled (API-only mode)
+      if (!batchData && SUPABASE_DISABLED) {
         setLoadingProgress(prev => ({
           step: 'metrics',
           stepNumber: 1,
@@ -384,9 +388,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           percentage: 5,
           supabaseStatus: prev?.supabaseStatus
         }))
-        
         try {
-          // Try batch endpoint
           batchData = await getBatchMetrics(week, 8)
           batchMode = true
           console.log(`📦 Loaded all metrics from API for ${week}`)
@@ -394,6 +396,17 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           console.warn('Batch endpoint failed, falling back to individual calls:', batchError)
           batchMode = false
         }
+      }
+
+      // Supabase is primary but no data for this week – error already set above; load periods only and exit
+      if (!batchData && !SUPABASE_DISABLED) {
+        try {
+          const periodsData = await getPeriods(week)
+          setPeriods(periodsData)
+        } catch (_) {}
+        setLoading(false)
+        setLoadingProgress(null)
+        return
       }
       
       // Set all data from batch response (from Supabase or API)
@@ -975,7 +988,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           return
         }
         
-        const supabaseMetrics = await loadWeeklyReportMetricsFromSupabase(baseWeek, false) // Don't auto-fallback to API
+        const supabaseMetrics = await loadWeeklyReportMetricsFromSupabase(baseWeek)
         
         if (supabaseMetrics) {
           // Load periods from API (periods are not stored in Supabase, they're calculated)

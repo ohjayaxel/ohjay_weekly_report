@@ -1,5 +1,7 @@
 # Supabase Setup Guide
 
+**Viktigt:** Appen använder **endast** data från Supabase. Om det inte finns data för vald vecka i Supabase visas meddelandet "Ingen data för denna vecka laddad än". API används inte som källa – endast för att synka data till Supabase (Settings → Refresh all data) och för perioder.
+
 ## Steg 1: Vänta på att Supabase-projektet är klart
 När projektet är klart får du:
 - **Project URL**: `https://xxxxx.supabase.co`
@@ -16,6 +18,11 @@ När projektet är klart får du:
 
 **Alla fyra nycklar måste vara från samma Supabase-projekt.** Om frontend-URL och backend-URL pekar på olika projekt (eller om anon key är från ett annat projekt) kommer sync och rapporter inte att fungera.
 
+### Nytt Supabase-projekt – var byter man uppgifter?
+- **Lokalt:** Uppdatera `frontend/.env.local` (frontend) och `.env` i projektets root (backend) med den nya Project URL och nycklarna från Supabase Dashboard → Settings → API.
+- **Vercel:** Project Settings → Environment Variables – uppdatera `NEXT_PUBLIC_SUPABASE_URL` och `NEXT_PUBLIC_SUPABASE_ANON_KEY` till det nya projektet. Sätt `NEXT_PUBLIC_DISABLE_SUPABASE=false` (eller ta bort variabeln). Redeploya efter ändring.
+- **Backend (Railway/Render/etc.):** Uppdatera `SUPABASE_URL` och `SUPABASE_SERVICE_ROLE_KEY` till det nya projektet.
+
 ### Backend (`.env` i projektets root)
 Hämtas från Supabase Dashboard → Settings → API:
 ```env
@@ -23,11 +30,12 @@ SUPABASE_URL=https://DITT_PROJECT_REF.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...  # service_role key (hemlig)
 ```
 
-### Frontend (`frontend/.env.local`)
+### Frontend (`frontend/.env.local` och Vercel Environment Variables)
 Samma projekt-URL som backend; anon key från samma sida:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://DITT_PROJECT_REF.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...  # anon public key
+NEXT_PUBLIC_DISABLE_SUPABASE=false   # false eller utelämna så att Supabase används
 ```
 
 Kontroll: `NEXT_PUBLIC_SUPABASE_URL` och `SUPABASE_URL` ska ha samma domän (samma PROJECT_REF).

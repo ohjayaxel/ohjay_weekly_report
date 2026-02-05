@@ -3,11 +3,18 @@
 import os
 from pathlib import Path
 
-# Load .env from project root so SUPABASE_* and other vars are available before any request
-_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-if _env_path.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_env_path)
+# Load .env so SUPABASE_* and other vars are available before any request.
+# Try project root (relative to this file) first, then cwd so it works regardless of how server is started.
+from dotenv import load_dotenv
+_env_path_root = Path(__file__).resolve().parent.parent.parent / ".env"
+_env_path_cwd = Path.cwd() / ".env"
+if _env_path_root.exists():
+    load_dotenv(_env_path_root)
+if _env_path_cwd.exists() and (
+    not _env_path_root.exists() or _env_path_root.resolve() != _env_path_cwd.resolve()
+):
+    load_dotenv(_env_path_cwd)  # fallback when root missing or started from another cwd
+# Supabase env check is logged at startup (after logger is imported)
 
 from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -417,6 +424,21 @@ logger.add(
     diagnose=True
 )
 logger.info("Backend logging configured. Logs will be written to backend.log")
+
+
+@app.on_event("startup")
+def _log_supabase_status():
+    """Log whether Supabase is configured so sync/cache work."""
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if url and key:
+        logger.info("Supabase: configured (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY set)")
+    else:
+        logger.warning(
+            "Supabase: not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env at project root. "
+            "Sync and cache will be disabled until then."
+        )
+
 
 # Add CORS middleware
 # Allow localhost for development and Vercel domains for production

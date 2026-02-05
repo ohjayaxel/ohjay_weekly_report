@@ -124,10 +124,11 @@ def calculate_all_metrics(base_week: str, data_root: Path, num_weeks: int = 8) -
         products_new_data = calculate_top_products_for_weeks(base_week, 1, data_root)
         results['products_new'] = products_new_data
         
-        # 10. Calculate top products (gender)
+        # 10. Calculate top products (gender) – both men and women
         logger.info("Calculating top products by gender...")
-        products_gender_data = calculate_top_products_by_gender_for_weeks(base_week, 1, data_root)
-        results['products_gender'] = products_gender_data
+        products_gender_men = calculate_top_products_by_gender_for_weeks(base_week, 1, data_root, 'men')
+        products_gender_women = calculate_top_products_by_gender_for_weeks(base_week, 1, data_root, 'women')
+        results['products_gender'] = {'men': products_gender_men, 'women': products_gender_women}
         
         # 11. Calculate sessions per country
         logger.info("Calculating sessions per country...")

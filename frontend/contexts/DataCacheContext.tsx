@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
 import { 
+  hasBackend,
   getPeriods, 
   getTable1Metrics, 
   getTopMarkets, 
@@ -256,37 +257,48 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
     try {
       // When user clicks "Refresh all data": sync first so the selected week is computed and saved to Supabase
       if (forceRefresh && !SUPABASE_DISABLED) {
-        setLoadingProgress({
-          step: 'sync',
-          stepNumber: 0,
-          totalSteps: 27,
-          message: 'Checking Supabase – syncing data...',
-          percentage: 0,
-          supabaseStatus: 'Supabase: Connecting...'
-        })
-        try {
-          const { syncSupabase } = await import('@/lib/api')
-          await syncSupabase(week, 8)
+        if (hasBackend) {
           setLoadingProgress({
             step: 'sync',
             stepNumber: 0,
             totalSteps: 27,
-            message: 'Supabase sync OK – data saved.',
-            percentage: 2,
-            supabaseStatus: 'Supabase sync: OK'
+            message: 'Checking Supabase – syncing data...',
+            percentage: 0,
+            supabaseStatus: 'Supabase: Connecting...'
           })
-          console.log(`✅ Supabase sync completed for week ${week}`)
-        } catch (syncErr: any) {
-          const backendMessage = syncErr?.message || String(syncErr)
+          try {
+            const { syncSupabase } = await import('@/lib/api')
+            await syncSupabase(week, 8)
+            setLoadingProgress({
+              step: 'sync',
+              stepNumber: 0,
+              totalSteps: 27,
+              message: 'Supabase sync OK – data saved.',
+              percentage: 2,
+              supabaseStatus: 'Supabase sync: OK'
+            })
+            console.log(`✅ Supabase sync completed for week ${week}`)
+          } catch (syncErr: any) {
+            const backendMessage = syncErr?.message || String(syncErr)
+            setLoadingProgress({
+              step: 'sync',
+              stepNumber: 0,
+              totalSteps: 27,
+              message: 'Supabase sync failed – using API.',
+              percentage: 2,
+              supabaseStatus: `Supabase sync: Failed – ${backendMessage}`
+            })
+            console.warn('Supabase sync failed (continuing with load):', syncErr)
+          }
+        } else {
           setLoadingProgress({
             step: 'sync',
             stepNumber: 0,
             totalSteps: 27,
-            message: 'Supabase sync failed – using API.',
+            message: 'No backend – reading from Supabase only.',
             percentage: 2,
-            supabaseStatus: `Supabase sync: Failed – ${backendMessage}`
+            supabaseStatus: 'Reading from Supabase only (no sync)'
           })
-          console.warn('Supabase sync failed (continuing with load):', syncErr)
         }
       } else if (forceRefresh && SUPABASE_DISABLED) {
         setLoadingProgress({

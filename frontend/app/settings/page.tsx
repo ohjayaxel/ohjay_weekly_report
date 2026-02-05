@@ -11,8 +11,7 @@ import { Separator } from '@/components/ui/separator'
 import { useDataCache } from '@/contexts/DataCacheContext'
 import { useChartSettings } from '@/contexts/ChartSettingsContext'
 import { RefreshCw, CheckCircle2, XCircle } from 'lucide-react'
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+import { hasBackend } from '@/lib/api'
 const METADATA_CACHE_EXPIRY = 10 * 60 * 1000 // 10 minutes
 const DIMENSIONS_CACHE_EXPIRY = 10 * 60 * 1000 // 10 minutes
 
@@ -37,6 +36,11 @@ export default function Settings() {
 
   const loadMetadata = useCallback(async (clearCache = false) => {
     setMetadataLoading(true)
+    if (!hasBackend) {
+      setMetadata({ error: 'Backend not configured. File status is only available when NEXT_PUBLIC_API_URL is set (e.g. running locally).' })
+      setMetadataLoading(false)
+      return
+    }
     const cacheKey = `file_metadata_${selectedWeek}`
     
     if (clearCache) {
@@ -62,8 +66,8 @@ export default function Settings() {
     try {
       const controller = new AbortController()
       timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
-      
-      const response = await fetch(`${API_BASE_URL}/api/file-metadata?week=${selectedWeek}`, {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const response = await fetch(`${apiBase}/api/file-metadata?week=${selectedWeek}`, {
         signal: controller.signal
       })
       
@@ -105,7 +109,7 @@ export default function Settings() {
       ) {
         console.error('Network error loading metadata:', error)
         setMetadata({ 
-          error: `Network error: Unable to connect to backend server at ${API_BASE_URL}. Please check if the backend server is running.` 
+          error: 'Network error: Unable to connect to backend. Please check if the backend is running and NEXT_PUBLIC_API_URL is set.' 
         })
       } else {
         console.error('Failed to load metadata:', error)
@@ -118,6 +122,11 @@ export default function Settings() {
 
   const loadDimensions = useCallback(async (clearCache = false) => {
     setLoadingDimensions(true)
+    if (!hasBackend) {
+      setDimensions({})
+      setLoadingDimensions(false)
+      return
+    }
     const cacheKey = `file_dimensions_${selectedWeek}`
     
     if (clearCache) {
@@ -140,7 +149,8 @@ export default function Settings() {
     }
     
     try {
-      const response = await fetch(`${API_BASE_URL}/api/file-dimensions?week=${selectedWeek}`)
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const response = await fetch(`${apiBase}/api/file-dimensions?week=${selectedWeek}`)
       if (!response.ok) {
         console.warn(`Failed to fetch dimensions: ${response.statusText}`)
         setDimensions({})

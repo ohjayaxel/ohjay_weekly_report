@@ -241,16 +241,14 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         sync_finished = datetime.utcnow()
         elapsed = (sync_finished - sync_started).total_seconds()
         
+        # Schema has row_counts JSONB (no 'details' column). Store counts + elapsed in row_counts.
         supabase.table("sync_runs").insert({
             "id": sync_id,
             "base_week": week,
             "started_at": sync_started.isoformat(),
             "finished_at": sync_finished.isoformat(),
             "success": True,
-            "details": {
-                "row_counts": row_counts,
-                "elapsed_seconds": elapsed
-            }
+            "row_counts": { "elapsed_seconds": elapsed, **row_counts }
         }).execute()
         
         logger.success(f"Sync completed successfully in {elapsed:.2f} seconds")
@@ -277,9 +275,8 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                     "started_at": sync_started.isoformat(),
                     "finished_at": sync_finished.isoformat(),
                     "success": False,
-                    "details": {
-                        "error": str(e)
-                    }
+                    "error_message": str(e),
+                    "row_counts": None
                 }).execute()
         except Exception as log_error:
             logger.error(f"Failed to log sync error: {log_error}")

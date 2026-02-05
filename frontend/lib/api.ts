@@ -1,5 +1,12 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+/** True when a backend URL is configured (local or production). When false, app reads only from Supabase and uses client-side periods. */
+export const hasBackend = Boolean(
+  typeof process !== 'undefined' && process.env.NEXT_PUBLIC_API_URL && String(process.env.NEXT_PUBLIC_API_URL).trim()
+)
+
+import { getPeriodsFromBaseWeek } from './periods'
+
 export interface PeriodsResponse {
   actual: string
   last_week: string
@@ -186,6 +193,9 @@ export function getDownloadUrl(filename: string): string {
 }
 
 export async function getPeriods(baseWeek: string): Promise<PeriodsResponse> {
+  if (!hasBackend) {
+    return getPeriodsFromBaseWeek(baseWeek) as PeriodsResponse
+  }
   const response = await fetch(`${API_BASE_URL}/api/periods?base_week=${baseWeek}`)
   if (!response.ok) {
     throw new Error(`Failed to fetch periods: ${response.statusText}`)
@@ -775,6 +785,19 @@ export async function verifySupabase(): Promise<{
   query_error: string | null
   table_row_count: number | null
 }> {
+  if (!hasBackend) {
+    return {
+      env_file_loaded: false,
+      SUPABASE_URL: 'not_set',
+      SUPABASE_SERVICE_ROLE_KEY: 'not_set',
+      key_length: 0,
+      client_created: false,
+      client_error: 'Backend not configured. Set NEXT_PUBLIC_API_URL for sync and verify.',
+      query_ok: false,
+      query_error: null,
+      table_row_count: null,
+    }
+  }
   const response = await fetch(`${API_BASE_URL}/api/supabase/verify`)
   if (!response.ok) throw new Error(`Verify failed: ${response.statusText}`)
   return response.json()
@@ -785,6 +808,11 @@ export async function syncSupabase(
   baseWeek: string,
   numWeeks: number = 8
 ): Promise<{ success: boolean; week: string; row_counts?: Record<string, number>; elapsed_seconds?: number; sync_id?: string; error?: string }> {
+  if (!hasBackend) {
+    throw new Error(
+      'Backend not configured. Sync is only available when NEXT_PUBLIC_API_URL is set. Run sync locally and data will appear in production from Supabase.'
+    )
+  }
   const response = await fetch(
     `${API_BASE_URL}/api/sync-supabase?week=${encodeURIComponent(baseWeek)}&num_weeks=${numWeeks}`,
     { method: 'POST' }

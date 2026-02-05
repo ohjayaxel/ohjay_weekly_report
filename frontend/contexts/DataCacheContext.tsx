@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react'
 import { 
   hasBackend,
   getPeriods, 
@@ -172,6 +172,8 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
   const [loadingProgress, setLoadingProgress] = useState<LoadingProgress | null>(null)
   const [baseWeek, setBaseWeekInternal] = useState<string>(DEFAULT_BASE_WEEK)
   const [isDataReady, setIsDataReady] = useState(false)
+  /** Ref to invalidate in-flight passive Supabase loads when baseWeek changes or a new load starts (so stale load cannot overwrite state). */
+  const passiveLoadWeekRef = useRef<string | null>(null)
   
   // Wrap setBaseWeek to also save to localStorage
   const setBaseWeek = useCallback((week: string) => {
@@ -988,7 +990,10 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
     }
     
     // No cache - try Supabase (silent, no progress spinner)
-    // This is a background load that doesn't block the UI
+    // Use a ref so only the latest load for the current week can write state (stale loads are ignored)
+    const loadForWeek = baseWeek
+    passiveLoadWeekRef.current = loadForWeek
+    const isStale = () => passiveLoadWeekRef.current !== loadForWeek
     ;(async () => {
       try {
         const { loadWeeklyReportMetricsFromSupabase } = await import('@/lib/supabase-queries')
@@ -1000,21 +1005,25 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           return
         }
         
-        const supabaseMetrics = await loadWeeklyReportMetricsFromSupabase(baseWeek)
+        const supabaseMetrics = await loadWeeklyReportMetricsFromSupabase(loadForWeek)
+        if (isStale()) return
         
         if (supabaseMetrics) {
           // Load periods from API (periods are not stored in Supabase, they're calculated)
           // This is a lightweight call that just calculates week numbers
           let periodsData: PeriodsResponse | null = null
           try {
-            periodsData = await getPeriods(baseWeek)
+            periodsData = await getPeriods(loadForWeek)
+            if (isStale()) return
             setPeriods(periodsData)
-            console.log(`✅ Loaded periods from API for ${baseWeek}`)
+            console.log(`✅ Loaded periods from API for ${loadForWeek}`)
           } catch (periodsError) {
+            if (isStale()) return
             console.warn('Failed to load periods:', periodsError)
             // Don't fail completely - metrics can still be displayed
           }
           
+          if (isStale()) return
           // Load data from Supabase metrics (supabaseMetrics is the full batch response)
           setMetrics(supabaseMetrics.metrics)
           setMarkets(supabaseMetrics.markets)
@@ -1039,7 +1048,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           setIsDataReady(true)
           
           // Save to cache for faster future loads
-          saveCache(baseWeek, {
+          saveCache(loadForWeek, {
             periods: periodsData,
             metrics: supabaseMetrics.metrics,
             markets: supabaseMetrics.markets,
@@ -1069,17 +1078,20 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
             timestamp: Date.now()
           })
           
-          console.log(`✅ Loaded data from Supabase for ${baseWeek}`)
+          console.log(`✅ Loaded data from Supabase for ${loadForWeek}`)
         } else {
+          if (isStale()) return
           // No Supabase data - but we can still load periods from API (they're calculated, not stored)
           try {
-            const periodsData = await getPeriods(baseWeek)
+            const periodsData = await getPeriods(loadForWeek)
+            if (isStale()) return
             setPeriods(periodsData)
-            console.log(`✅ Loaded periods from API for ${baseWeek} (no Supabase data)`)
+            console.log(`✅ Loaded periods from API for ${loadForWeek} (no Supabase data)`)
           } catch (periodsError) {
             console.warn('Failed to load periods:', periodsError)
           }
           
+          if (isStale()) return
           // Clear all other data
           setMetrics(null)
           setMarkets(null)
@@ -1109,16 +1121,19 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           setIsDataReady(false)
         }
       } catch (error) {
+        if (isStale()) return
         // Supabase load failed - but we can still load periods from API (they're calculated, not stored)
         console.debug('Failed to load from Supabase (non-blocking):', error)
         try {
-          const periodsData = await getPeriods(baseWeek)
+          const periodsData = await getPeriods(loadForWeek)
+          if (isStale()) return
           setPeriods(periodsData)
-          console.log(`✅ Loaded periods from API for ${baseWeek} (Supabase load failed)`)
+          console.log(`✅ Loaded periods from API for ${loadForWeek} (Supabase load failed)`)
         } catch (periodsError) {
           console.warn('Failed to load periods:', periodsError)
         }
         
+        if (isStale()) return
         // Clear all other data
         setMetrics(null)
         setMarkets(null)
@@ -1145,7 +1160,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
         setBudget_raw(null)
         setActuals_markets(null)
         setActuals_markets_detailed(null)
-        setIsDataReady(false)
+          setIsDataReady(false)
       }
     })()
   }, [baseWeek]) // Load from cache or Supabase when week changes

@@ -132,12 +132,13 @@ interface DataCacheContextType {
   baseWeek: string
   setBaseWeek: (week: string) => void
   isDataReady: boolean
+  /** True after the restore-from-URL/localStorage effect has run; use to avoid hydration mismatch. */
+  hasRestoredWeek: boolean
 }
 
 const DataCacheContext = createContext<DataCacheContextType | undefined>(undefined)
 
 const CACHE_EXPIRY = 24 * 60 * 60 * 1000 // 24 hours (increased since Supabase is primary)
-const DEFAULT_BASE_WEEK = '2025-42'
 const SUPABASE_DISABLED = process.env.NEXT_PUBLIC_DISABLE_SUPABASE === 'true'
 
 export function DataCacheProvider({ children }: { children: ReactNode }) {
@@ -170,15 +171,18 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadingProgress, setLoadingProgress] = useState<LoadingProgress | null>(null)
-  const [baseWeek, setBaseWeekInternal] = useState<string>(DEFAULT_BASE_WEEK)
+  const [baseWeek, setBaseWeekInternal] = useState<string>('')
+  /** False until the restore-from-URL/localStorage effect has run; avoids hydration mismatch (server has no localStorage). */
+  const [hasRestoredWeek, setHasRestoredWeek] = useState(false)
   const [isDataReady, setIsDataReady] = useState(false)
   /** Ref to invalidate in-flight passive Supabase loads when baseWeek changes or a new load starts (so stale load cannot overwrite state). */
   const passiveLoadWeekRef = useRef<string | null>(null)
   
-  // Wrap setBaseWeek to also save to localStorage
+  // Wrap setBaseWeek to also save to localStorage (empty string = no week selected)
   const setBaseWeek = useCallback((week: string) => {
     setBaseWeekInternal(week)
-    localStorage.setItem('selected_week', week)
+    if (week) localStorage.setItem('selected_week', week)
+    else localStorage.removeItem('selected_week')
   }, [])
 
   // Bump cache version to invalidate stale data after backend calc changes
@@ -214,6 +218,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
   }
 
   const loadAllData = useCallback(async (week: string, forceRefresh = false) => {
+    if (!week) return
     setError(null)
 
     // Check cache first
@@ -366,7 +371,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
                 percentage: 5,
                 supabaseStatus: prev?.supabaseStatus ? `${prev.supabaseStatus} · No data` : 'Supabase read: No data'
               }))
-              setError('Ingen data för denna vecka laddad än. Använd "Refresh all data" i Settings för att synka data till Supabase.')
+              // Don't set error – "no data" is shown as friendly empty state on report pages
             }
           }
         } catch (supabaseError) {
@@ -471,23 +476,39 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
         setTotal_contribution_per_country(batchData.total_contribution_per_country)
       }
       
-      // Budget-related steps (show progress) - load regardless of batch mode
+      // Budget-related steps (show progress) - prefer Supabase to avoid API 404 when data is synced
       if (batchMode && batchData) {
         setLoadingProgress({ step: 'metrics', stepNumber: 22, totalSteps: 27, message: 'Loading budget general...', percentage: 85 })
         let budgetGeneralData: BudgetGeneralResponse | null = null
         let actualsGeneralData: ActualsGeneralResponse | null = null
         try {
-          budgetGeneralData = await getBudgetGeneral(week)
-          setBudget_general(budgetGeneralData)
-        } catch (e) {
-          budgetGeneralData = null
+          const { loadBudgetGeneralFromSupabase } = await import('@/lib/supabase-queries')
+          const fromSupabase = await loadBudgetGeneralFromSupabase(week)
+          if (fromSupabase.budget) {
+            budgetGeneralData = fromSupabase.budget
+            setBudget_general(budgetGeneralData)
+          }
+          if (fromSupabase.actuals) {
+            actualsGeneralData = fromSupabase.actuals
+            setActuals_general(actualsGeneralData)
+          }
+        } catch (_) { /* Supabase budget load failed, fall back to API */ }
+        if (budgetGeneralData == null) {
+          try {
+            budgetGeneralData = await getBudgetGeneral(week)
+            setBudget_general(budgetGeneralData)
+          } catch (_) {
+            budgetGeneralData = null
+          }
         }
         setLoadingProgress({ step: 'metrics', stepNumber: 23, totalSteps: 27, message: 'Loading actuals general...', percentage: 88 })
-        try {
-          actualsGeneralData = await getActualsGeneral(week)
-          setActuals_general(actualsGeneralData)
-        } catch (e) {
-          actualsGeneralData = null
+        if (actualsGeneralData == null) {
+          try {
+            actualsGeneralData = await getActualsGeneral(week)
+            setActuals_general(actualsGeneralData)
+          } catch (_) {
+            actualsGeneralData = null
+          }
         }
         // Budget raw (for Markets prototype)
         setLoadingProgress({ step: 'metrics', stepNumber: 24, totalSteps: 27, message: 'Loading budget raw (markets)...', percentage: 91 })
@@ -892,6 +913,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
   // Removed auto-load useEffect that was triggering on baseWeek change
 
   const refreshData = useCallback(async () => {
+    if (!baseWeek) return
     await loadAllData(baseWeek, true)
   }, [baseWeek, loadAllData])
 
@@ -915,33 +937,31 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
     }
   }, [baseWeek])
 
-  // Load saved week from localStorage on mount (but don't auto-load data)
-  // Also read week from URL if present (for PDF generation)
+  // Restore week from URL or localStorage (runs once on client; set hasRestoredWeek so LayoutContent can avoid hydration mismatch).
   useEffect(() => {
-    // Check URL for week parameter first (for PDF generation)
-    if (typeof window !== 'undefined') {
-      const urlParams = new URLSearchParams(window.location.search)
-      const weekFromUrl = urlParams.get('week')
-      if (weekFromUrl) {
-        console.log(`📌 Week parameter found in URL: ${weekFromUrl}`)
-        setBaseWeekInternal(weekFromUrl)
-        localStorage.setItem('selected_week', weekFromUrl)
-        return
-      }
+    if (typeof window === 'undefined') return
+
+    const urlParams = new URLSearchParams(window.location.search)
+    const weekFromUrl = urlParams.get('week')
+    if (weekFromUrl) {
+      console.log(`📌 Week parameter found in URL: ${weekFromUrl}`)
+      setBaseWeekInternal(weekFromUrl)
+      localStorage.setItem('selected_week', weekFromUrl)
+      setHasRestoredWeek(true)
+      return
     }
-    
-    // Fallback to localStorage
+
     const savedWeek = localStorage.getItem('selected_week')
     if (savedWeek) {
       setBaseWeekInternal(savedWeek)
     }
+    setHasRestoredWeek(true)
   }, [])
   
-  // Load cached data on mount and when baseWeek changes - from cache OR Supabase (silent, no progress spinner)
-  // Also trigger data load if data is missing but week is set (for PDF generation)
+  // Load cached data when baseWeek is set – from cache or Supabase (no load until user has selected a week)
   useEffect(() => {
     if (!baseWeek) return
-    
+
     // First, try localStorage cache
     const cached = getCachedData(baseWeek)
     if (cached) {
@@ -1086,7 +1106,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
             const periodsData = await getPeriods(loadForWeek)
             if (isStale()) return
             setPeriods(periodsData)
-            console.log(`✅ Loaded periods from API for ${loadForWeek} (no Supabase data)`)
+            console.debug(`Loaded periods from API for ${loadForWeek} (no Supabase data)`)
           } catch (periodsError) {
             console.warn('Failed to load periods:', periodsError)
           }
@@ -1163,7 +1183,7 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           setIsDataReady(false)
       }
     })()
-  }, [baseWeek]) // Load from cache or Supabase when week changes
+  }, [baseWeek])
 
   const value: DataCacheContextType = {
     periods,
@@ -1200,7 +1220,8 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
     clearCache,
     baseWeek: baseWeek,
     setBaseWeek,
-    isDataReady
+    isDataReady,
+    hasRestoredWeek
   }
 
   return <DataCacheContext.Provider value={value}>{children}</DataCacheContext.Provider>

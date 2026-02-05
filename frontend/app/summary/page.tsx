@@ -6,35 +6,34 @@ import { useDataCache } from '@/contexts/DataCacheContext'
 import { Loader2 } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
+import Link from 'next/link'
 
 export default function Summary() {
   const { periods, baseWeek, loading, error, loadAllData } = useDataCache()
   const [metrics, setMetrics] = useState<unknown>(null)
-  const [retryCount, setRetryCount] = useState(0)
 
-  // Load data on mount if not already loaded
+  // Load data when a week is selected and not already loaded
   useEffect(() => {
-    if (!periods && !loading && baseWeek) {
+    if (!baseWeek) return
+    if (!periods && !loading) {
       loadAllData(baseWeek, false)
     }
   }, [periods, loading, baseWeek, loadAllData])
 
   const handleRetry = async () => {
-    setRetryCount(prev => prev + 1)
     if (baseWeek) {
       await loadAllData(baseWeek, true)
     }
   }
 
-  // Show error if loading fails and no periods after a delay
-  const showError = error || (!periods && !loading && retryCount > 0)
+  const noDataForWeek = baseWeek && !periods && !loading && !error
 
   return (
     <div className="space-y-8">
-      {showError && (
+      {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <p className="text-sm text-red-800 mb-2">
-            {error || 'Failed to load data. Please check if the backend server is running.'}
+            {error}
           </p>
           <Button 
             onClick={handleRetry}
@@ -46,6 +45,22 @@ export default function Summary() {
           </Button>
         </div>
       )}
+      {noDataForWeek && (
+        <div className="rounded-lg border bg-muted/40 p-6 text-center">
+          <p className="text-sm text-muted-foreground mb-2">
+            No data for this week yet.
+          </p>
+          <p className="text-sm text-muted-foreground mb-4">
+            Choose another week in the dropdown above or sync data in Settings.
+          </p>
+          <Link
+            href="/settings"
+            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Go to Settings
+          </Link>
+        </div>
+      )}
       {periods ? (
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Summary Metrics</h2>
@@ -55,7 +70,7 @@ export default function Summary() {
             onMetricsChange={setMetrics}
           />
         </div>
-      ) : (
+      ) : !noDataForWeek && (
         <div className="space-y-4">
           <div className="flex items-center gap-3">
             <Loader2 className="h-6 w-6 animate-spin text-primary" />

@@ -60,10 +60,11 @@ export default function PeriodSelector({
           <div className="relative">
             <select
               id="week-select"
-              value={selectedWeek}
-              onChange={(e) => handleWeekChange(e.target.value)}
+              value={selectedWeek || ''}
+              onChange={(e) => handleWeekChange(e.target.value || '')}
               className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white"
             >
+              <option value="">Välj vecka</option>
               {weekOptions.map((week) => (
                 <option key={week} value={week}>
                   {week}

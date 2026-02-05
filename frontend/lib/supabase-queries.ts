@@ -139,6 +139,34 @@ function rowsToBudgetFormat(
 }
 
 /**
+ * Get the latest base_week that has data in Supabase (weekly_report_metrics).
+ * Used to auto-select the most recent week on first load when no URL/localStorage week is set.
+ */
+export async function getLatestBaseWeekFromSupabase(): Promise<string | null> {
+  try {
+    if (!isSupabaseAvailable() || !supabase || !process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return null
+    }
+    const { data, error } = await supabase
+      .from('weekly_report_metrics')
+      .select('base_week')
+      .order('base_week', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (error) {
+      console.debug('Supabase getLatestBaseWeek error:', error.message)
+      return null
+    }
+    const row = data as { base_week?: string } | null
+    return row?.base_week ?? null
+  } catch (error: any) {
+    console.warn('Error getting latest base week from Supabase:', error?.message || error)
+    return null
+  }
+}
+
+/**
  * Load Weekly Report Metrics from Supabase only (no API fallback).
  * Returns the complete BatchMetricsResponse structure, or null if no data for the week.
  */
@@ -149,7 +177,7 @@ export async function loadWeeklyReportMetricsFromSupabase(baseWeek: string): Pro
       return null
     }
 
-    console.log(`🔍 Loading metrics from Supabase for week ${baseWeek}...`)
+    console.debug(`Loading metrics from Supabase for week ${baseWeek}...`)
     const { data, error } = await supabase
       .from('weekly_report_metrics')
       .select('*')

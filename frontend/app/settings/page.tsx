@@ -36,6 +36,11 @@ export default function Settings() {
 
   const loadMetadata = useCallback(async (clearCache = false) => {
     setMetadataLoading(true)
+    if (!selectedWeek) {
+      setMetadata(null)
+      setMetadataLoading(false)
+      return
+    }
     if (!hasBackend) {
       setMetadata({ error: 'Backend not configured. File status is only available when NEXT_PUBLIC_API_URL is set (e.g. running locally).' })
       setMetadataLoading(false)
@@ -122,6 +127,11 @@ export default function Settings() {
 
   const loadDimensions = useCallback(async (clearCache = false) => {
     setLoadingDimensions(true)
+    if (!selectedWeek) {
+      setDimensions(null)
+      setLoadingDimensions(false)
+      return
+    }
     if (!hasBackend) {
       setDimensions({})
       setLoadingDimensions(false)
@@ -229,13 +239,10 @@ export default function Settings() {
           <div>
             <h3 className="text-sm font-medium mb-3">Select Week</h3>
             <PeriodSelector 
-              selectedWeek={selectedWeek}
+              selectedWeek={selectedWeek || ''}
               onWeekChange={(week) => {
-                setSelectedWeek(week)
-                // Update the global baseWeek in DataCacheContext
-                setBaseWeek(week)
-                // Save the selected week to localStorage
-                localStorage.setItem('selected_week', week)
+                setSelectedWeek(week || '')
+                setBaseWeek(week || '')
               }}
               onPeriodsChange={(p) => setPeriods(p as any)}
             />
@@ -351,8 +358,11 @@ export default function Settings() {
           <Separator />
 
           <div className="space-y-6">
-            <h3 className="text-sm font-medium">Upload Files for Week {selectedWeek}</h3>
+            <h3 className="text-sm font-medium">
+              {selectedWeek ? `Upload Files for Week ${selectedWeek}` : 'Välj en vecka ovan för att ladda upp filer'}
+            </h3>
             
+            {selectedWeek && (
             <BatchFileUpload
               fileTypes={fileTypes}
               currentWeek={selectedWeek}
@@ -367,11 +377,14 @@ export default function Settings() {
               loading={loading}
               loadingProgress={loadingProgress}
             />
+            )}
 
             {/* File Metadata Display */}
             <div className="space-y-4 mt-6">
               <h4 className="text-sm font-medium">Current Files</h4>
-              {metadataLoading && metadata === null ? (
+              {!selectedWeek ? (
+                <p className="text-sm text-muted-foreground">Välj en vecka för att se filstatus.</p>
+              ) : metadataLoading && metadata === null ? (
                 <div className="text-sm text-gray-500 italic flex items-center gap-2">
                   <RefreshCw className="h-4 w-4 animate-spin" />
                   Loading file status...

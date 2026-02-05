@@ -27,8 +27,15 @@ export default function Settings() {
   const metadataTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const [supabaseVerifyLoading, setSupabaseVerifyLoading] = useState(false)
   const [supabaseVerifyResult, setSupabaseVerifyResult] = useState<any>(null) // Track if PDF has been downloaded to prevent duplicate downloads
+  const [weeksWithData, setWeeksWithData] = useState<Set<string> | null>(null)
   const supabaseDisabled = process.env.NEXT_PUBLIC_DISABLE_SUPABASE === 'true'
-  
+
+  useEffect(() => {
+    import('@/lib/supabase-queries')
+      .then((m) => m.getWeeksWithDataFromSupabase())
+      .then((weeks) => setWeeksWithData(new Set(weeks)))
+  }, [])
+
   // Sync selectedWeek with baseWeek from context
   useEffect(() => {
     setSelectedWeek(baseWeek)
@@ -235,16 +242,31 @@ export default function Settings() {
           </div>
 
           <Separator />
-          
+
           <div>
-            <h3 className="text-sm font-medium mb-3">Select Week</h3>
-            <PeriodSelector 
+            <div className="flex items-center gap-3 mb-3">
+              <h3 className="text-sm font-medium">Select Week</h3>
+              {selectedWeek && weeksWithData != null && (
+                <span
+                  className={`text-xs font-medium px-2 py-0.5 rounded ${
+                    weeksWithData.has(selectedWeek)
+                      ? 'bg-green-100 text-green-800'
+                      : 'bg-amber-100 text-amber-800'
+                  }`}
+                  title={weeksWithData.has(selectedWeek) ? 'Data loaded for this week' : 'No data uploaded for this week yet'}
+                >
+                  {weeksWithData.has(selectedWeek) ? 'Has data' : 'No data'}
+                </span>
+              )}
+            </div>
+            <PeriodSelector
               selectedWeek={selectedWeek || ''}
               onWeekChange={(week) => {
                 setSelectedWeek(week || '')
                 setBaseWeek(week || '')
               }}
               onPeriodsChange={(p) => setPeriods(p as any)}
+              weeksWithData={weeksWithData}
             />
           </div>
 

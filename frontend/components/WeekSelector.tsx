@@ -7,10 +7,12 @@ interface WeekSelectorProps {
   value: string
   onChange: (week: string) => void
   className?: string
+  /** Set of base_week strings that have data in Supabase; when set, options show "week ✓" or "week (no data)". */
+  weeksWithData?: Set<string> | null
 }
 
 /** Lightweight week dropdown (year-week). Same option range as PeriodSelector. */
-export default function WeekSelector({ value, onChange, className = '' }: WeekSelectorProps) {
+export default function WeekSelector({ value, onChange, className = '', weeksWithData = null }: WeekSelectorProps) {
   const weekOptions = useMemo(() => {
     const currentYear = new Date().getFullYear()
     const years = [currentYear - 2, currentYear - 1, currentYear, currentYear + 1]
@@ -22,6 +24,11 @@ export default function WeekSelector({ value, onChange, className = '' }: WeekSe
     }
     return options
   }, [])
+
+  const optionLabel = (week: string) => {
+    if (weeksWithData == null) return week
+    return weeksWithData.has(week) ? `${week} ✓` : `${week} (no data)`
+  }
 
   return (
     <div className={`flex items-center gap-2 ${className}`}>
@@ -35,7 +42,7 @@ export default function WeekSelector({ value, onChange, className = '' }: WeekSe
         <option value="">Select week</option>
         {weekOptions.map((week) => (
           <option key={week} value={week}>
-            {week}
+            {optionLabel(week)}
           </option>
         ))}
       </select>

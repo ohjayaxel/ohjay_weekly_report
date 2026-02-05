@@ -1,5 +1,6 @@
 'use client'
 
+import { useState, useEffect } from 'react'
 import { useDataCache } from '@/contexts/DataCacheContext'
 import LoadingProgress from '@/components/LoadingProgress'
 import { useSearchParams, usePathname } from 'next/navigation'
@@ -8,7 +9,14 @@ import { Calendar, Settings, Loader2 } from 'lucide-react'
 import WeekSelector from '@/components/WeekSelector'
 
 export default function LayoutContent({ children }: { children: React.ReactNode }) {
-  const { loading, loadingProgress, baseWeek, setBaseWeek, hasRestoredWeek } = useDataCache()
+  const { loading, loadingProgress, baseWeek, setBaseWeek, hasRestoredWeek, isDataReady, periods } = useDataCache()
+  const [weeksWithData, setWeeksWithData] = useState<Set<string> | null>(null)
+
+  useEffect(() => {
+    import('@/lib/supabase-queries')
+      .then((m) => m.getWeeksWithDataFromSupabase())
+      .then((weeks) => setWeeksWithData(new Set(weeks)))
+  }, [])
   const searchParams = useSearchParams()
   const pathname = usePathname()
   const pdfParam = searchParams?.get('pdf')
@@ -51,10 +59,31 @@ export default function LayoutContent({ children }: { children: React.ReactNode 
 
   // Report pages: show week selector bar so user can change week without going to Settings
   if (baseWeek && !isSettings && !isPdfMode) {
+    const dataStatus = loading
+      ? 'loading'
+      : isDataReady
+        ? 'has-data'
+        : periods
+          ? 'no-data'
+          : 'loading'
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2 rounded-md">
-          <WeekSelector value={baseWeek} onChange={setBaseWeek} />
+          <div className="flex items-center gap-3">
+            <WeekSelector value={baseWeek} onChange={setBaseWeek} weeksWithData={weeksWithData} />
+            <span
+              className={`text-xs font-medium px-2 py-0.5 rounded ${
+                dataStatus === 'has-data'
+                  ? 'bg-green-100 text-green-800'
+                  : dataStatus === 'no-data'
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-muted text-muted-foreground'
+              }`}
+              title={dataStatus === 'has-data' ? 'Data loaded for this week' : dataStatus === 'no-data' ? 'No data uploaded for this week yet' : 'Loading…'}
+            >
+              {dataStatus === 'has-data' ? 'Has data' : dataStatus === 'no-data' ? 'No data' : 'Loading…'}
+            </span>
+          </div>
           <Link
             href="/settings"
             className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"

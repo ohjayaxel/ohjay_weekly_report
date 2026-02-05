@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import Link from 'next/link'
 
 export default function TopMarkets() {
-  const { periods, baseWeek, loading, error, loadAllData, markets } = useDataCache()
+  const { periods, baseWeek, loading, error, loadAllData, markets, isDataReady } = useDataCache()
 
   // Load data when a week is selected and not already loaded
   useEffect(() => {
@@ -23,7 +23,7 @@ export default function TopMarkets() {
     if (baseWeek) await loadAllData(baseWeek, true)
   }
 
-  const noDataForWeek = baseWeek && !periods && !loading && !error
+  const noDataForWeek = baseWeek && !loading && !error && (!periods || !isDataReady)
 
   return (
     <div className="space-y-8">
@@ -43,7 +43,7 @@ export default function TopMarkets() {
           </Link>
         </div>
       )}
-      {periods ? (
+      {periods && isDataReady ? (
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Top Markets</h2>
           <TopMarketsTable baseWeek={baseWeek} />

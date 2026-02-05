@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import Link from 'next/link'
 
 export default function Summary() {
-  const { periods, baseWeek, loading, error, loadAllData } = useDataCache()
+  const { periods, baseWeek, loading, error, loadAllData, isDataReady } = useDataCache()
   const [metrics, setMetrics] = useState<unknown>(null)
 
   // Load data when a week is selected and not already loaded
@@ -26,7 +26,7 @@ export default function Summary() {
     }
   }
 
-  const noDataForWeek = baseWeek && !periods && !loading && !error
+  const noDataForWeek = baseWeek && !loading && !error && (!periods || !isDataReady)
 
   return (
     <div className="space-y-8">
@@ -61,7 +61,7 @@ export default function Summary() {
           </Link>
         </div>
       )}
-      {periods ? (
+      {periods && isDataReady ? (
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Summary Metrics</h2>
           <MetricsPreview 

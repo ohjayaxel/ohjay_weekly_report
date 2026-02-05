@@ -139,6 +139,32 @@ function rowsToBudgetFormat(
 }
 
 /**
+ * Get all base_week values that have data in Supabase (weekly_report_metrics).
+ * Used to show "Has data" / "No data" per week in the week dropdown.
+ */
+export async function getWeeksWithDataFromSupabase(): Promise<string[]> {
+  try {
+    if (!isSupabaseAvailable() || !supabase || !process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return []
+    }
+    const { data, error } = await supabase
+      .from('weekly_report_metrics')
+      .select('base_week')
+      .order('base_week', { ascending: false })
+
+    if (error) {
+      console.debug('Supabase getWeeksWithData error:', error.message)
+      return []
+    }
+    const rows = (data || []) as { base_week?: string }[]
+    return rows.map((r) => r.base_week).filter((w): w is string => typeof w === 'string')
+  } catch (error: any) {
+    console.warn('Error getting weeks with data from Supabase:', error?.message || error)
+    return []
+  }
+}
+
+/**
  * Get the latest base_week that has data in Supabase (weekly_report_metrics).
  * Used to auto-select the most recent week on first load when no URL/localStorage week is set.
  */

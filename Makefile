@@ -50,4 +50,3 @@ run-backend: ## Start API server on port 8000 (must run from project root)
 # Start frontend dev server
 run-frontend: ## Start Next.js dev server on port 3000
 	cd frontend && npm run dev
-

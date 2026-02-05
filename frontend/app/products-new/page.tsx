@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import Link from 'next/link'
 
 export default function ProductsNew() {
-  const { baseWeek, periods, loading, error, loadAllData } = useDataCache()
+  const { baseWeek, periods, loading, error, loadAllData, isDataReady } = useDataCache()
 
   // Load data when a week is selected and not already loaded
   useEffect(() => {
@@ -23,7 +23,7 @@ export default function ProductsNew() {
     if (baseWeek) await loadAllData(baseWeek, true)
   }
 
-  const noDataForWeek = baseWeek && !periods && !loading && !error
+  const noDataForWeek = baseWeek && !loading && !error && (!periods || !isDataReady)
 
   return (
     <div className="space-y-8">
@@ -43,7 +43,7 @@ export default function ProductsNew() {
           </Link>
         </div>
       )}
-      {periods ? (
+      {periods && isDataReady ? (
         <div className="grid grid-cols-2 gap-6">
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Products New</h2>

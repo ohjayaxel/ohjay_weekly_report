@@ -8,12 +8,15 @@ interface PeriodSelectorProps {
   selectedWeek: string
   onWeekChange: (week: string) => void
   onPeriodsChange: (periods: PeriodsResponse | null) => void
+  /** Set of base_week strings that have data in Supabase; when set, options show "week ✓" or "week (no data)". */
+  weeksWithData?: Set<string> | null
 }
 
 export default function PeriodSelector({ 
   selectedWeek, 
   onWeekChange, 
-  onPeriodsChange 
+  onPeriodsChange,
+  weeksWithData = null
 }: PeriodSelectorProps) {
   const [periods, setPeriods] = useState<PeriodsResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -50,6 +53,11 @@ export default function PeriodSelector({
     onWeekChange(week)
   }
 
+  const optionLabel = (week: string) => {
+    if (weeksWithData == null) return week
+    return weeksWithData.has(week) ? `${week} ✓` : `${week} (no data)`
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center space-x-4">
@@ -67,7 +75,7 @@ export default function PeriodSelector({
               <option value="">Välj vecka</option>
               {weekOptions.map((week) => (
                 <option key={week} value={week}>
-                  {week}
+                  {optionLabel(week)}
                 </option>
               ))}
             </select>

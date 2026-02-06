@@ -68,7 +68,7 @@ def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str)
         supabase.storage.from_(RAW_DATA_BUCKET).upload(
             path=storage_path,
             file=data,
-            file_options={"content-type": "application/octet-stream", "upsert": True},
+            file_options={"content-type": "application/octet-stream", "upsert": "true"},
         )
         logger.info(f"Uploaded to Storage: {storage_path}")
         return True, None

@@ -461,14 +461,21 @@ if vercel_url:
     else:
         cors_origins.append(vercel_url)
 
-# Also allow custom frontend URL if set
-frontend_url = os.getenv("FRONTEND_URL")
-if frontend_url:
-    cors_origins.append(frontend_url)
+# Also allow custom frontend URL(s) – comma-separated for production + preview deploys
+frontend_url_env = os.getenv("FRONTEND_URL")
+if frontend_url_env:
+    for origin in (s.strip() for s in frontend_url_env.split(",") if s.strip()):
+        if not origin.startswith("http"):
+            origin = f"https://{origin}"
+        cors_origins.append(origin)
+
+# Allow any Vercel deployment (production + preview URLs that change per deploy)
+cors_origin_regex = r"https://[a-zA-Z0-9-]+\.vercel\.app$"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1491,8 +1498,13 @@ async def invalidate_cache(base_week: str):
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "weekly-report-api"}
+    """Health check endpoint. Includes Supabase and CORS config status for production checks."""
+    supabase_ok = bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+    return {
+        "status": "healthy",
+        "service": "weekly-report-api",
+        "supabase_configured": supabase_ok,
+    }
 
 
 @app.get("/api/debug/markets")

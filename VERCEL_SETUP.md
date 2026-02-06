@@ -10,6 +10,55 @@ Detta projekt består av två delar:
 
 ---
 
+## Production: Vercel + Railway + Supabase (100 %)
+
+För att allt ska fungera utan lokala uppladdningar och rapportgenerering – sätt följande och redeploya både Vercel och Railway efter ändringar.
+
+### 1. Supabase (redan klart)
+- Samma projekt används av både frontend och backend.
+- Tabeller skapade med `supabase_schema.sql`.
+
+### 2. Railway (backend)
+
+I Railway → ditt projekt → **Variables**:
+
+| Variabel | Värde | Kommentar |
+|----------|--------|-----------|
+| `SUPABASE_URL` | `https://&lt;projekt&gt;.supabase.co` | Samma som i Supabase Dashboard |
+| `SUPABASE_SERVICE_ROLE_KEY` | `eyJ...` | Supabase → Settings → API → service_role |
+| `FRONTEND_URL` | Din Vercel-URL | **Viktigt för CORS.** T.ex. `https://din-app.vercel.app` |
+
+**FRONTEND_URL:** Backend tillåter bara anrop från domäner som finns i CORS. Railway har inte tillgång till Vercels URL, så du **måste** sätta `FRONTEND_URL` till din exakta Vercel-URL (med `https://`).  
+Flera origin (t.ex. production + preview): använd komma mellan URL:er, t.ex.  
+`https://din-app.vercel.app,https://din-app-git-branch-xxx.vercel.app`
+
+**Verifiera backend:** Öppna `https://din-railway-url.up.railway.app/api/health` – du ska få `{"status":"healthy","service":"weekly-report-api","supabase_configured":true}`.
+
+### 3. Vercel (frontend)
+
+I Vercel → Project → **Settings** → **Environment Variables**:
+
+| Variabel | Värde | Kommentar |
+|----------|--------|-----------|
+| `NEXT_PUBLIC_API_URL` | `https://din-railway-url.up.railway.app` | Railway-URL **utan** avslutande `/` |
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://&lt;projekt&gt;.supabase.co` | Samma som backend |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `eyJ...` | Supabase → Settings → API → anon public |
+
+Valfritt: `NEXT_PUBLIC_DISABLE_SUPABASE=false` (eller låt vara osatt) så att frontend läser från Supabase.
+
+**Efter ändring:** Vercel → Deployments → … → **Redeploy** så att bygget får nya variablerna.
+
+**OBS (Railway):** Fillagringen på Railway är ephemeral – uppladdade filer finns kvar tills tjänsten startar om. Flödet är: ladda upp → backend processar och skriver cache till Supabase → frontend och rapporter läser från Supabase. Så länge du synkar/genererar efter uppladdning finns datan kvar i Supabase.
+
+### 4. Kontroll att allt fungerar
+
+1. Öppna din **Vercel-URL** i webbläsaren.
+2. **Settings** i appen → "Verifiera Supabase (backend)" → ska visa t.ex. "Supabase read: OK" om backend är nåbar och Supabase fungerar.
+3. I DevTools → Network: anrop till Railway ska ge 200 (inga CORS-fel).
+4. Ladda upp data och generera rapport från Vercel; allt ska gå via Railway + Supabase.
+
+---
+
 ## Steg 1: Förbered projektet
 
 ### 1.1 Kontrollera att frontend kan byggas
@@ -89,11 +138,13 @@ Backend (FastAPI) behöver deployas separat. Alternativ:
 1. Skapa konto på [railway.app](https://railway.app)
 2. Skapa nytt projekt från GitHub-repo
 3. Sätt Root Directory till projektets root (inte frontend)
-4. Lägg till miljövariabler:
+4. Lägg till miljövariabler (se även **Production: Vercel + Railway + Supabase** ovan):
    ```
    SUPABASE_URL=https://ditt-supabase-project.supabase.co
    SUPABASE_SERVICE_ROLE_KEY=ditt_service_role_key
+   FRONTEND_URL=https://din-vercel-app.vercel.app
    ```
+   **FRONTEND_URL** behövs så att CORS tillåter anrop från din Vercel-app. Flera URL:er: separera med komma.
 5. Sätt start command: `python3 -m uvicorn weekly_report.api.routes:app --host 0.0.0.0 --port $PORT`
 
 ### Alternativ 2: Render

@@ -26,11 +26,11 @@
 ### Backend Deployment
 - [ ] Backend deployad (Railway/Render/etc.)
 - [ ] Backend URL dokumenterad
-- [ ] Backend miljövariabler satta:
+- [ ] Backend miljövariabler satta (se VERCEL_SETUP.md → Production):
   - [ ] `SUPABASE_URL`
   - [ ] `SUPABASE_SERVICE_ROLE_KEY`
-  - [ ] `FRONTEND_URL` (för CORS)
-- [ ] CORS uppdaterad för Vercel-domän
+  - [ ] `FRONTEND_URL` (exakt Vercel-URL, t.ex. `https://din-app.vercel.app` – flera separeras med komma)
+- [ ] `/api/health` visar `supabase_configured: true`
 
 ### Testing
 - [ ] Frontend laddar korrekt på Vercel

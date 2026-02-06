@@ -64,9 +64,10 @@ def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str)
         logger.warning("Bucket creation failed or skipped; attempting upload anyway")
     storage_path = f"{week}/{file_type}/{filename}"
     try:
+        # Supabase Python client expects path, bytes, or file path – not BytesIO
         supabase.storage.from_(RAW_DATA_BUCKET).upload(
             path=storage_path,
-            file=io.BytesIO(data),
+            file=data,
             file_options={"content-type": "application/octet-stream", "upsert": True},
         )
         logger.info(f"Uploaded to Storage: {storage_path}")

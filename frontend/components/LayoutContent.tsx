@@ -7,20 +7,30 @@ import { useSearchParams, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { Calendar, Settings, Loader2 } from 'lucide-react'
 import WeekSelector from '@/components/WeekSelector'
+import { hasBackend } from '@/lib/api'
 
 export default function LayoutContent({ children }: { children: React.ReactNode }) {
   const { loading, loadingProgress, baseWeek, setBaseWeek, hasRestoredWeek, isDataReady, periods } = useDataCache()
   const [weeksWithData, setWeeksWithData] = useState<Set<string> | null>(null)
 
+  // "Has data" = filer finns i Supabase (Storage). Backend returnerar veckor med filer (disk + Storage).
   useEffect(() => {
     const load = async () => {
-      const [supabaseWeeks, aliasesRes] = await Promise.all([
-        import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()),
-        import('@/lib/api').then((m) => m.getWeekAliases()).catch(() => ({ aliases: {} as Record<string, string> })),
-      ])
-      const set = new Set(supabaseWeeks)
-      if (aliasesRes?.aliases) Object.keys(aliasesRes.aliases).forEach((w) => set.add(w))
-      setWeeksWithData(set)
+      if (hasBackend) {
+        try {
+          const { getWeeksWithFiles } = await import('@/lib/api')
+          const res = await getWeeksWithFiles()
+          setWeeksWithData(new Set(res.weeks || []))
+        } catch {
+          const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+          const weeks = await getWeeksWithDataFromSupabase()
+          setWeeksWithData(new Set(weeks))
+        }
+      } else {
+        const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+        const weeks = await getWeeksWithDataFromSupabase()
+        setWeeksWithData(new Set(weeks))
+      }
     }
     load()
   }, [])
@@ -65,14 +75,15 @@ export default function LayoutContent({ children }: { children: React.ReactNode 
   }
 
   // Report pages: show week selector bar so user can change week without going to Settings
+  // "Has data" = vald vecka har uppladdade filer i Supabase (Storage)
   if (baseWeek && !isSettings && !isPdfMode) {
     const dataStatus = loading
       ? 'loading'
-      : isDataReady
-        ? 'has-data'
-        : periods
-          ? 'no-data'
-          : 'loading'
+      : weeksWithData === null
+        ? 'loading'
+        : weeksWithData.has(baseWeek)
+          ? 'has-data'
+          : 'no-data'
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2 rounded-md">
@@ -86,7 +97,7 @@ export default function LayoutContent({ children }: { children: React.ReactNode 
                     ? 'bg-amber-100 text-amber-800'
                     : 'bg-muted text-muted-foreground'
               }`}
-              title={dataStatus === 'has-data' ? 'Data loaded for this week' : dataStatus === 'no-data' ? 'No data uploaded for this week yet' : 'Loading…'}
+              title={dataStatus === 'has-data' ? 'Filer uppladdade i Supabase för denna vecka' : dataStatus === 'no-data' ? 'Inga filer uppladdade för denna vecka – ladda upp under Inställningar' : 'Loading…'}
             >
               {dataStatus === 'has-data' ? 'Has data' : dataStatus === 'no-data' ? 'No data' : 'Loading…'}
             </span>

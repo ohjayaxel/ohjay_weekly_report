@@ -37,31 +37,28 @@ export default function Settings() {
   const [generateLoading, setGenerateLoading] = useState(false)
   const [generatingForTarget, setGeneratingForTarget] = useState<string | null>(null)
 
+  // "Has data" = filer finns i Supabase (Storage). Backend returnerar veckor med filer (disk + Storage).
   useEffect(() => {
-    import('@/lib/supabase-queries')
-      .then((m) => m.getWeeksWithDataFromSupabase())
-      .then((weeks) => setWeeksWithData(new Set(weeks)))
-  }, [])
+    if (hasBackend) {
+      Promise.all([
+        import('@/lib/api').then((m) => m.getWeeksWithFiles()),
+        import('@/lib/api').then((m) => m.getWeeksAvailable()),
+        import('@/lib/api').then((m) => m.getWeekAliases()),
+      ]).then(([wf, wa, al]) => {
+        setWeeksWithFiles(wf.weeks || [])
+        setWeeksAvailable(wa.weeks || [])
+        setWeekAliases(al.aliases || {})
+        setWeeksWithData(new Set(wf.weeks || []))
+      }).catch(() => {})
+    } else {
+      import('@/lib/supabase-queries')
+        .then((m) => m.getWeeksWithDataFromSupabase())
+        .then((weeks) => setWeeksWithData(new Set(weeks)))
+    }
+  }, [hasBackend])
 
-  useEffect(() => {
-    if (!hasBackend) return
-    Promise.all([
-      import('@/lib/api').then((m) => m.getWeeksWithFiles()),
-      import('@/lib/api').then((m) => m.getWeeksAvailable()),
-      import('@/lib/api').then((m) => m.getWeekAliases()),
-    ]).then(([wf, wa, al]) => {
-      setWeeksWithFiles(wf.weeks || [])
-      setWeeksAvailable(wa.weeks || [])
-      setWeekAliases(al.aliases || {})
-    }).catch(() => {})
-  }, [])
-
-  // Weeks that have data: from Supabase or via alias (so 2026-04 shows "Has data" when 2026-04 → 2026-05)
-  const effectiveWeeksWithData = useMemo(() => {
-    const set = new Set(weeksWithData ?? [])
-    Object.keys(weekAliases).forEach((w) => set.add(w))
-    return set
-  }, [weeksWithData, weekAliases])
+  // "Has data" = veckor som har uppladdade filer i Supabase (Storage). Inga alias-räknas-in.
+  const effectiveWeeksWithData = useMemo(() => new Set(weeksWithData ?? []), [weeksWithData])
 
   // Sync selectedWeek with baseWeek from context
   useEffect(() => {
@@ -346,7 +343,15 @@ export default function Settings() {
                     setGenerateTarget(copyTo)
                     setCopyTo('')
                     setCopyFrom('')
-                    await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
+                    if (hasBackend) {
+                      const { getWeeksWithFiles } = await import('@/lib/api')
+                      const r = await getWeeksWithFiles()
+                      setWeeksWithData(new Set(r.weeks || []))
+                    } else {
+                      const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                      const weeks = await getWeeksWithDataFromSupabase()
+                      setWeeksWithData(new Set(weeks))
+                    }
                   } catch (e: any) {
                     setAliasActionMessage(e?.message || 'Failed to set alias')
                   } finally {
@@ -375,7 +380,15 @@ export default function Settings() {
                       setAliasActionMessage(`Reports generated for ${generateTarget}. You can now select that week to view.`)
                       setGenerateTarget(null)
                       await refreshData()
-                      await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
+                      if (hasBackend) {
+                        const { getWeeksWithFiles } = await import('@/lib/api')
+                        const r = await getWeeksWithFiles()
+                        setWeeksWithData(new Set(r.weeks || []))
+                      } else {
+                        const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                        const weeks = await getWeeksWithDataFromSupabase()
+                        setWeeksWithData(new Set(weeks))
+                      }
                     } catch (e: any) {
                       setAliasActionMessage(e?.message || 'Failed to generate reports')
                     } finally {
@@ -408,7 +421,15 @@ export default function Settings() {
                             await syncSupabase(target, 8)
                             setAliasActionMessage(`Reports generated for ${target}.`)
                             await refreshData()
-                            await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
+                            if (hasBackend) {
+                              const { getWeeksWithFiles } = await import('@/lib/api')
+                              const r = await getWeeksWithFiles()
+                              setWeeksWithData(new Set(r.weeks || []))
+                            } else {
+                              const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                              const weeks = await getWeeksWithDataFromSupabase()
+                              setWeeksWithData(new Set(weeks))
+                            }
                           } catch (e: any) {
                             setAliasActionMessage(e?.message || 'Failed to generate')
                           } finally {
@@ -461,7 +482,14 @@ export default function Settings() {
               currentWeek={selectedWeek}
               onUploadComplete={async () => {
                 await loadMetadata(true)
-                // Don't auto-load dimensions - user can click button if needed
+                if (hasBackend) {
+                  try {
+                    const { getWeeksWithFiles } = await import('@/lib/api')
+                    const r = await getWeeksWithFiles()
+                    setWeeksWithData(new Set(r.weeks || []))
+                    setWeeksWithFiles(r.weeks || [])
+                  } catch (_) { /* ignore */ }
+                }
               }}
               refreshData={async () => {
                 await refreshData()

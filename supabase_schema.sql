@@ -241,3 +241,11 @@ COMMENT ON TABLE budget_markets_detailed IS 'Budget markets detailed data (month
 COMMENT ON TABLE budget_markets_totals IS 'Budget markets totals (aggregated by scope)';
 COMMENT ON TABLE weeks IS 'Tracks which weeks have been processed';
 COMMENT ON TABLE sync_runs IS 'Tracks sync operations for debugging and monitoring';
+
+-- ---------------------------------------------------------------------------
+-- Supabase Storage (create in Dashboard: Storage -> New bucket)
+-- Bucket name: raw-data (private). Used for raw weekly files in production
+-- (Railway) so reports can be generated without local disk. Path layout:
+--   {week}/{file_type}/{filename}  e.g. 2026-05/qlik/sales.csv
+-- The backend creates the bucket on first upload if it does not exist.
+-- ---------------------------------------------------------------------------

@@ -70,6 +70,20 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         # Step 0: Check cache and compute Weekly Report Metrics
         logger.info("Computing Weekly Report Metrics...")
         
+        # Ensure raw data is on disk (from local path or Supabase Storage for production/Railway)
+        try:
+            from weekly_report.src.adapters.supabase_storage import ensure_week_raw_data
+            ensure_week_raw_data(config.week, config.data_root)
+        except FileNotFoundError as e:
+            logger.error(str(e))
+            return {
+                "success": False,
+                "error": str(e),
+                "elapsed_seconds": time.time() - start_time,
+            }
+        except Exception as e:
+            logger.warning(f"ensure_week_raw_data: {e} (continuing with existing files)")
+        
         # Calculate current file hashes (from data_week folder)
         current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
         logger.info(f"File hashes for data week {config.week}: {list(current_file_hashes.keys())}")

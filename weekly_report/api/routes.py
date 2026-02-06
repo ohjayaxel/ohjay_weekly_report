@@ -2591,6 +2591,14 @@ async def get_batch_all_metrics(
         # Fallback: Compute metrics (data from config.week, report for base_week when aliased)
         config = get_data_config(base_week)
         report_week = base_week if config.week != base_week else None
+        # Ensure raw data is on disk (from local or Supabase Storage for production/Railway)
+        try:
+            from weekly_report.src.adapters.supabase_storage import ensure_week_raw_data
+            ensure_week_raw_data(config.week, config.data_root)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.warning(f"ensure_week_raw_data: {e} (continuing with existing files)")
         logger.info(f"Computing batch metrics for {base_week} (data: {config.week}, report: {base_week}) with {num_weeks} weeks")
         all_metrics = calculate_all_metrics(config.week, config.data_root, num_weeks, report_week=report_week)
         
@@ -2743,24 +2751,56 @@ async def upload_file(
         if file_type in ["dema_spend", "dema_gm2", "shopify", "budget"] and file_extension != '.csv':
             raise HTTPException(status_code=400, detail=f"{file_type} file must be .csv")
         
-        # Create target directory (always use requested week for uploads, not alias)
         config = load_config(week=week)
+        raw_to_storage_only = file_type in ("qlik", "dema_spend", "dema_gm2", "shopify")
+        
+        if raw_to_storage_only:
+            # Raw data files: upload directly to Supabase Storage (no local save). Production/Railway.
+            file_data = await file.read()
+            import tempfile
+            import os
+            suffix = Path(file.filename).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(file_data)
+                tmp_path = Path(tmp.name)
+            try:
+                from weekly_report.src.adapters.supabase_storage import upload_raw_file_bytes
+                if not upload_raw_file_bytes(week, file_type, file_data, file.filename):
+                    raise HTTPException(status_code=500, detail="Failed to upload file to Supabase Storage")
+                metadata = extract_file_metadata(tmp_path, file_type)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            logger.info(f"File uploaded to Supabase Storage: {week}/{file_type}/{file.filename}")
+            # Clear caches and invalidate Supabase metrics cache (same as below)
+            raw_data_cache.clear()
+            try:
+                from weekly_report.src.adapters.supabase_client import get_supabase_client
+                supabase_client = get_supabase_client()
+                if supabase_client:
+                    supabase_client.table("weekly_report_metrics").delete().eq("base_week", week).execute()
+                    logger.info(f"✅ Invalidated Supabase cache for week {week}")
+            except Exception as invalidation_error:
+                logger.warning(f"Failed to invalidate Supabase cache (non-blocking): {invalidation_error}")
+            return {
+                "success": True,
+                "file_path": f"supabase://raw-data/{week}/{file_type}/{file.filename}",
+                "metadata": metadata
+            }
+        
+        # Budget: save to local path then to Supabase DB (local path used for reading content)
         target_dir = config.raw_data_path / file_type
         target_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Delete existing files in the directory (except .DS_Store)
         for existing_file in target_dir.glob("*.*"):
             if not existing_file.name.startswith('.'):
                 existing_file.unlink()
                 logger.info(f"Deleted old file: {existing_file}")
-        
-        # Save file
         target_path = target_dir / file.filename
         with target_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        logger.info(f"File uploaded: {target_path}")
-        logger.info(f"DEBUG: file_type='{file_type}', week='{week}', filename='{file.filename}'")
+        logger.info(f"File uploaded (budget): {target_path}")
         
         # Special handling for budget files: save to Supabase for reuse
         if file_type == "budget":
@@ -2817,8 +2857,6 @@ async def upload_file(
                 import traceback
                 logger.error(f"❌ Failed to save budget file to Supabase: {e}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
-        else:
-            logger.info(f"🔍 DEBUG: Skipping Supabase save - file_type='{file_type}' (not 'budget')")
         
         # Clear caches to ensure fresh data after upload
         # Get the week's data path for cache invalidation

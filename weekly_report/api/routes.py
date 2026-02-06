@@ -16,12 +16,13 @@ if _env_path_cwd.exists() and (
     load_dotenv(_env_path_cwd)  # fallback when root missing or started from another cwd
 # Supabase env check is logged at startup (after logger is imported)
 
-from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Response
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 import json
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
+import re
 import tempfile
 import shutil
 from datetime import datetime
@@ -498,6 +499,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _cors_allow_origin(origin: Optional[str]) -> Optional[str]:
+    """Return the origin to put in Access-Control-Allow-Origin if allowed, else None."""
+    if not origin:
+        return None
+    if origin in cors_origins:
+        return origin
+    if cors_origin_regex and re.match(cors_origin_regex, origin):
+        return origin
+    return None
+
+
+@app.exception_handler(Exception)
+async def ensure_cors_on_exception(request: Request, exc: Exception):
+    """Ensure 500 responses include CORS headers so the browser does not hide the error."""
+    if isinstance(exc, HTTPException):
+        raise exc
+    origin = request.headers.get("origin")
+    allow_origin = _cors_allow_origin(origin)
+    headers = {}
+    if allow_origin:
+        headers["Access-Control-Allow-Origin"] = allow_origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=headers,
+    )
 
 
 @app.get("/api/periods", response_model=PeriodsResponse)

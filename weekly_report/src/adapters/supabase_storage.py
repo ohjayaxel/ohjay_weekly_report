@@ -44,34 +44,41 @@ def upload_raw_file(week: str, file_type: str, local_path: Path, filename: str) 
         logger.warning(f"Upload path does not exist: {local_path}")
         return False
     data = local_path.read_bytes()
-    return upload_raw_file_bytes(week, file_type, data, filename)
+    ok, _ = upload_raw_file_bytes(week, file_type, data, filename)
+    return ok
 
 
-def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str) -> bool:
+def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str) -> Tuple[bool, Optional[str]]:
     """
     Upload raw data from memory to Supabase Storage at {week}/{file_type}/{filename}.
     Use this in production (e.g. Railway) to avoid writing to local disk.
-    Returns True on success.
+    Returns (True, None) on success, (False, error_message) on failure.
     """
     if file_type not in STORAGE_FILE_TYPES:
         logger.debug(f"Skip Storage upload for file_type={file_type}")
-        return False
+        return False, None
     supabase = get_supabase_client()
     if not supabase:
-        return False
-    _ensure_bucket()
+        return False, "Supabase client not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)"
+    if not _ensure_bucket():
+        logger.warning("Bucket creation failed or skipped; attempting upload anyway")
     storage_path = f"{week}/{file_type}/{filename}"
     try:
         supabase.storage.from_(RAW_DATA_BUCKET).upload(
             path=storage_path,
             file=io.BytesIO(data),
-            file_options={"content-type": "application/octet-stream", "upsert": "true"},
+            file_options={"content-type": "application/octet-stream", "upsert": True},
         )
         logger.info(f"Uploaded to Storage: {storage_path}")
-        return True
+        return True, None
     except Exception as e:
+        err_msg = str(e)
         logger.error(f"Storage upload failed for {storage_path}: {e}")
-        return False
+        if "Bucket not found" in err_msg or "not found" in err_msg.lower():
+            err_msg = (
+                "Bucket 'raw-data' not found in Supabase. Create it in Dashboard: Storage → New bucket, name: raw-data, private."
+            )
+        return False, err_msg
 
 
 def list_weeks_in_storage() -> List[str]:

@@ -2766,9 +2766,17 @@ async def upload_file(
                 tmp_path = Path(tmp.name)
             try:
                 from weekly_report.src.adapters.supabase_storage import upload_raw_file_bytes
-                if not upload_raw_file_bytes(week, file_type, file_data, file.filename):
-                    raise HTTPException(status_code=500, detail="Failed to upload file to Supabase Storage")
-                metadata = extract_file_metadata(tmp_path, file_type)
+                ok, err = upload_raw_file_bytes(week, file_type, file_data, file.filename)
+                if not ok:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=err or "Failed to upload file to Supabase Storage. Check that bucket 'raw-data' exists in Supabase Dashboard.",
+                    )
+                try:
+                    metadata = extract_file_metadata(tmp_path, file_type)
+                except Exception as meta_err:
+                    logger.warning(f"Metadata extraction failed (upload succeeded): {meta_err}")
+                    metadata = {}
             finally:
                 try:
                     os.unlink(tmp_path)

@@ -1526,7 +1526,8 @@ async def health_check():
 
 
 def _list_weeks_with_uploaded_files() -> List[str]:
-    """Return sorted list of ISO week strings that have files on disk or data in Supabase (for 'Copy data from')."""
+    """Return sorted list of ISO week strings that have raw files on disk or in Supabase Storage (for 'Copy data from').
+    Only weeks with actual raw data are included, so we don't show 2026-05 as available if it only has cached metrics."""
     config = load_config()
     raw_root = config.data_root / "raw"
     weeks_set = set()
@@ -1547,18 +1548,14 @@ def _list_weeks_with_uploaded_files() -> List[str]:
                             break
                     except OSError:
                         pass
-    # From Supabase (weeks that have been synced – so dropdown works on Railway where disk is ephemeral)
+    # From Supabase Storage (raw files) – so dropdown matches what we can actually load on Railway
     try:
-        from weekly_report.src.adapters.supabase_client import get_supabase_client
-        supabase = get_supabase_client()
-        if supabase:
-            r = supabase.table("weekly_report_metrics").select("base_week").execute()
-            for row in (r.data or []):
-                w = row.get("base_week")
-                if w and validate_iso_week(w):
-                    weeks_set.add(w)
+        from weekly_report.src.adapters.supabase_storage import list_weeks_in_storage
+        for w in list_weeks_in_storage():
+            if validate_iso_week(w):
+                weeks_set.add(w)
     except Exception as e:
-        logger.debug(f"Supabase weeks for copy-from: {e}")
+        logger.debug(f"Storage weeks for copy-from: {e}")
     return sorted(weeks_set, reverse=True)
 
 
@@ -2594,7 +2591,11 @@ async def get_batch_all_metrics(
         # Ensure raw data is on disk (from local or Supabase Storage for production/Railway)
         try:
             from weekly_report.src.adapters.supabase_storage import ensure_week_raw_data
-            ensure_week_raw_data(config.week, config.data_root)
+            ensure_week_raw_data(
+                config.week,
+                config.data_root,
+                report_week=base_week if base_week != config.week else None,
+            )
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except Exception as e:

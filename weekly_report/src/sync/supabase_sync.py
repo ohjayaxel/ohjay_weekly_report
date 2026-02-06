@@ -73,7 +73,11 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         # Ensure raw data is on disk (from local path or Supabase Storage for production/Railway)
         try:
             from weekly_report.src.adapters.supabase_storage import ensure_week_raw_data
-            ensure_week_raw_data(config.week, config.data_root)
+            ensure_week_raw_data(
+                config.week,
+                config.data_root,
+                report_week=week if week != config.week else None,
+            )
         except FileNotFoundError as e:
             logger.error(str(e))
             return {

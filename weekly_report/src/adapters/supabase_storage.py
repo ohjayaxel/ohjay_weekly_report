@@ -74,6 +74,32 @@ def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str)
         return False
 
 
+def list_weeks_in_storage() -> List[str]:
+    """
+    List week identifiers (e.g. 2026-05) that have at least one raw file in Storage.
+    Used so "Copy data from" only shows weeks we can actually load.
+    """
+    supabase = get_supabase_client()
+    if not supabase:
+        return []
+    out: List[str] = []
+    try:
+        resp = supabase.storage.from_(RAW_DATA_BUCKET).list("")
+        top = getattr(resp, "data", resp) if resp is not None else []
+        if not top or not isinstance(top, (list, tuple)):
+            return []
+        for item in top:
+            name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+            if not name or name.startswith("."):
+                continue
+            # Only include if this week has at least one file (so we can actually use it as source)
+            if list_week_files(name):
+                out.append(name)
+    except Exception as e:
+        logger.debug(f"Storage list weeks: {e}")
+    return out
+
+
 def list_week_files(week: str) -> List[Tuple[str, str]]:
     """
     List all files in Storage for the given week.
@@ -146,12 +172,18 @@ def download_week_to_path(week: str, data_root: Path) -> bool:
     return count > 0
 
 
-def ensure_week_raw_data(week: str, data_root: Path) -> Path:
+def ensure_week_raw_data(
+    week: str,
+    data_root: Path,
+    *,
+    report_week: Optional[str] = None,
+) -> Path:
     """
     Ensure raw data for the week is available on disk. If data_root/raw/week already
     has content (e.g. qlik folder with files), returns that path. Otherwise tries to
     download from Supabase Storage into data_root/raw/week and returns the path.
     Raises FileNotFoundError if neither local data nor Storage has the data.
+    report_week: when set (alias case), error message explains which week to upload for.
     """
     raw_week_path = data_root / "raw" / week
     # Check if we already have usable data (e.g. qlik subfolder with files)
@@ -165,8 +197,15 @@ def ensure_week_raw_data(week: str, data_root: Path) -> Path:
     if download_week_to_path(week, data_root):
         return raw_week_path
     if not raw_week_path.exists() or not any(raw_week_path.rglob("*.*")):
-        raise FileNotFoundError(
-            f"No raw data for week {week}: not on disk at {raw_week_path} and none in Supabase Storage. "
-            "Upload files for this week first."
-        )
+        if report_week and report_week != week:
+            msg = (
+                f"Rapporten för vecka {report_week} använder data från vecka {week} (koppling). "
+                f"Ladda upp råfiler (qlik, dema_spend, dema_gm2, shopify) för vecka {week} under Data-filen — inte för {report_week}."
+            )
+        else:
+            msg = (
+                f"No raw data for week {week}: not on disk and none in Supabase Storage. "
+                "Upload files for this week first."
+            )
+        raise FileNotFoundError(msg)
     return raw_week_path

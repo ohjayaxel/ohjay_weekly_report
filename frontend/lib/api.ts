@@ -864,10 +864,18 @@ export async function syncSupabase(
     { method: 'POST' }
   )
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
+  if (!response.ok && response.status !== 409) {
     throw new Error(data?.detail || data?.error || `Sync failed: ${response.statusText}`)
   }
-  return { ...data, _accepted: response.status === 202 }
+  // 202 = started in background; 409 = already running → poll existing sync
+  const accepted = response.status === 202 || response.status === 409
+  return {
+    ...data,
+    _accepted: accepted,
+    message: response.status === 409
+      ? (data?.detail || 'Sync already in progress for this week. Showing progress.')
+      : data?.message,
+  }
 }
 
 /** Sync status for polling during background sync. */

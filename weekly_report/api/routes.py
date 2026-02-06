@@ -3791,6 +3791,14 @@ async def sync_supabase_endpoint(
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
 
+        # Prevent concurrent sync for the same week (would corrupt file reads, e.g. EOFError on xlsx)
+        current = _get_sync_status(week)
+        if current.get("status") == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Sync already in progress for week {week}. Wait for it to finish or check sync status.",
+            )
+
         from weekly_report.src.sync.supabase_sync import sync_supabase_data
 
         def run_sync():

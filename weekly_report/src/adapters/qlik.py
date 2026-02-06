@@ -1,11 +1,15 @@
 """CSV adapters for loading data from different sources."""
 
 import csv
+import time
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
 from loguru import logger
+
+EXCEL_READ_RETRIES = 2
+EXCEL_READ_RETRY_DELAY_SEC = 1.0
 
 
 def detect_csv_dialect(file_path: Path) -> csv.Dialect:
@@ -52,9 +56,18 @@ def load_csv_files(source_path: Path, source_name: str) -> pd.DataFrame:
     for file_path in csv_files:
         try:
             if file_path.suffix.lower() == '.xlsx':
-                # Load Excel file
-                df = pd.read_excel(file_path, na_values=['', 'NULL', 'null', 'N/A', 'n/a'])
-                logger.debug(f"Loaded Excel {file_path.name}: {df.shape}")
+                # Load Excel file (retry on EOFError in case of concurrent write/read)
+                for attempt in range(EXCEL_READ_RETRIES + 1):
+                    try:
+                        df = pd.read_excel(file_path, na_values=['', 'NULL', 'null', 'N/A', 'n/a'])
+                        logger.debug(f"Loaded Excel {file_path.name}: {df.shape}")
+                        break
+                    except (EOFError, OSError) as e:
+                        if attempt < EXCEL_READ_RETRIES:
+                            logger.warning(f"Excel read attempt {attempt + 1} failed ({e}), retrying in {EXCEL_READ_RETRY_DELAY_SEC}s...")
+                            time.sleep(EXCEL_READ_RETRY_DELAY_SEC)
+                        else:
+                            raise
             else:
                 # Detect dialect for CSV
                 dialect = detect_csv_dialect(file_path)

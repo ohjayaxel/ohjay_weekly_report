@@ -18,13 +18,37 @@ RAW_DATA_BUCKET = "raw-data"
 STORAGE_FILE_TYPES = ("qlik", "dema_spend", "dema_gm2", "shopify")
 
 
+def sanitize_storage_filename(filename: str) -> str:
+    """
+    Make filename safe for Supabase Storage (S3-compatible keys).
+    Replaces å/ä/ö with a/a/o, spaces with underscore, strips other unsafe chars.
+    """
+    if not filename or not filename.strip():
+        return "file"
+    s = filename.strip()
+    replacements = (
+        ("å", "a"), ("ä", "a"), ("ö", "o"),
+        ("Å", "A"), ("Ä", "A"), ("Ö", "O"),
+    )
+    for old, new in replacements:
+        s = s.replace(old, new)
+    s = s.replace(" ", "_")
+    safe = "".join(c for c in s if c.isalnum() or c in "-_.")
+    if not safe:
+        return "file"
+    # Ensure we keep extension (e.g. .xlsx, .csv)
+    if "." in safe and not safe.startswith("."):
+        return safe
+    return safe
+
+
 def _ensure_bucket() -> bool:
     """Create raw-data bucket if it does not exist. Returns True if bucket is available."""
     supabase = get_supabase_client()
     if not supabase:
         return False
     try:
-        supabase.storage.create_bucket(RAW_DATA_BUCKET, options={"public": False})
+        supabase.storage.create_bucket(RAW_DATA_BUCKET, options={"public": "false"})
         logger.info(f"Created Storage bucket: {RAW_DATA_BUCKET}")
         return True
     except Exception as e:
@@ -62,7 +86,8 @@ def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str)
         return False, "Supabase client not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)"
     if not _ensure_bucket():
         logger.warning("Bucket creation failed or skipped; attempting upload anyway")
-    storage_path = f"{week}/{file_type}/{filename}"
+    safe_name = sanitize_storage_filename(filename)
+    storage_path = f"{week}/{file_type}/{safe_name}"
     try:
         # Supabase Python client expects path, bytes, or file path – not BytesIO
         supabase.storage.from_(RAW_DATA_BUCKET).upload(
@@ -78,6 +103,12 @@ def upload_raw_file_bytes(week: str, file_type: str, data: bytes, filename: str)
         if "Bucket not found" in err_msg or "not found" in err_msg.lower():
             err_msg = (
                 "Bucket 'raw-data' not found in Supabase. Create it in Dashboard: Storage → New bucket, name: raw-data, private."
+            )
+        elif "413" in err_msg or "exceeded the maximum allowed size" in err_msg or "Payload too large" in err_msg or "file size" in err_msg.lower():
+            err_msg = (
+                "Filen är för stor för Supabase Storage (standardgräns 50 MB). "
+                "Öka gränsen i Supabase Dashboard: Storage → bucket 'raw-data' → inställningar → File size limit, "
+                "eller exportera Qlik-data som en mindre fil (t.ex. mindre datumintervall)."
             )
         return False, err_msg
 
@@ -187,23 +218,31 @@ def ensure_week_raw_data(
     report_week: Optional[str] = None,
 ) -> Path:
     """
-    Ensure raw data for the week is available on disk. If data_root/raw/week already
-    has content (e.g. qlik folder with files), returns that path. Otherwise tries to
-    download from Supabase Storage into data_root/raw/week and returns the path.
+    Ensure raw data for the week is available on disk. If Supabase Storage is
+    configured, always refresh from Storage first so new uploads (e.g. qlik) are
+    present. Otherwise uses existing data_root/raw/week if present.
     Raises FileNotFoundError if neither local data nor Storage has the data.
     report_week: when set (alias case), error message explains which week to upload for.
     """
     raw_week_path = data_root / "raw" / week
-    # Check if we already have usable data (e.g. qlik subfolder with files)
-    if raw_week_path.exists():
+    supabase = get_supabase_client()
+    # When Storage is available, always sync from Storage so we have the latest
+    # (e.g. qlik uploaded after a previous sync that only had dema/shopify).
+    if supabase and list_week_files(week):
+        download_week_to_path(week, data_root)
+    elif raw_week_path.exists():
         for sub in ("qlik", "dema_spend", "dema_gm2", "shopify"):
             sub_path = raw_week_path / sub
             if sub_path.is_dir() and any(sub_path.iterdir()):
                 logger.debug(f"Using existing raw data for week {week} at {raw_week_path}")
-                return raw_week_path
-    # Try Storage
-    if download_week_to_path(week, data_root):
-        return raw_week_path
+                break
+        else:
+            # No Storage or empty Storage and no usable local data
+            pass
+    else:
+        # No local path and we didn't download (no Storage or empty)
+        if not download_week_to_path(week, data_root):
+            pass  # fall through to error below
     if not raw_week_path.exists() or not any(raw_week_path.rglob("*.*")):
         if report_week and report_week != week:
             msg = (

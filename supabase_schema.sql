@@ -248,4 +248,6 @@ COMMENT ON TABLE sync_runs IS 'Tracks sync operations for debugging and monitori
 -- (Railway) so reports can be generated without local disk. Path layout:
 --   {week}/{file_type}/{filename}  e.g. 2026-05/qlik/sales.csv
 -- The backend creates the bucket on first upload if it does not exist.
+-- If Qlik/Excel exports are large: Storage -> raw-data -> Settings ->
+--   increase "File size limit" (default 50 MB on Free plan).
 -- ---------------------------------------------------------------------------

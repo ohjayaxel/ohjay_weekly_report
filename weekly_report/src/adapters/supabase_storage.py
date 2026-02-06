@@ -144,39 +144,57 @@ def list_week_files(week: str) -> List[Tuple[str, str]]:
     List all files in Storage for the given week.
     Returns list of (file_type, filename) e.g. [("qlik", "sales.csv"), ...].
     """
+    entries, _ = list_week_files_with_metadata(week)
+    return entries
+
+
+def list_week_files_with_metadata(week: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str, Optional[str]]]]:
+    """
+    List all files in Storage for the given week, with optional updated_at per file.
+    Returns (simple list of (file_type, filename), list of (file_type, filename, updated_at_iso)).
+    """
     supabase = get_supabase_client()
     if not supabase:
-        return []
-    out: List[Tuple[str, str]] = []
+        return [], []
+    out_simple: List[Tuple[str, str]] = []
+    out_meta: List[Tuple[str, str, Optional[str]]] = []
     try:
-        # List top-level under week (e.g. 2026-05 -> qlik, dema_spend, ...)
         resp = supabase.storage.from_(RAW_DATA_BUCKET).list(week)
         top = getattr(resp, "data", resp) if resp is not None else []
         if not top or not isinstance(top, (list, tuple)):
-            return []
-        # top can be list of dicts with "name" or objects with .name
+            return [], []
         for item in top:
             name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
             if not name or name.startswith("."):
                 continue
-            # List files in week/file_type
             sub_path = f"{week}/{name}"
             try:
                 files_resp = supabase.storage.from_(RAW_DATA_BUCKET).list(sub_path)
                 files = getattr(files_resp, "data", files_resp) if files_resp is not None else []
             except Exception:
-                # Might be a single file instead of folder
-                out.append((name, name))
+                out_simple.append((name, name))
+                out_meta.append((name, name, None))
                 continue
             if not files or not isinstance(files, (list, tuple)):
                 continue
             for f in files:
                 fname = f.get("name") if isinstance(f, dict) else getattr(f, "name", None)
-                if fname and not fname.startswith("."):
-                    out.append((name, fname))
+                if not fname or fname.startswith("."):
+                    continue
+                updated_at = None
+                if isinstance(f, dict):
+                    updated_at = f.get("updated_at") or f.get("created_at")
+                else:
+                    updated_at = getattr(f, "updated_at", None) or getattr(f, "created_at", None)
+                if isinstance(updated_at, str) and "T" in updated_at:
+                    pass  # already ISO
+                elif hasattr(updated_at, "isoformat"):
+                    updated_at = updated_at.isoformat() if updated_at else None
+                out_simple.append((name, fname))
+                out_meta.append((name, fname, updated_at))
     except Exception as e:
         logger.debug(f"Storage list for week {week}: {e}")
-    return out
+    return out_simple, out_meta
 
 
 def download_week_to_path(week: str, data_root: Path) -> bool:

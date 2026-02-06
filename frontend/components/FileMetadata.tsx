@@ -5,9 +5,9 @@ import { Calendar, FileText } from 'lucide-react'
 
 interface FileMetadataProps {
   filename: string
-  firstDate: string
-  lastDate: string
-  uploadedAt: string
+  firstDate?: string
+  lastDate?: string
+  uploadedAt?: string | null
   rowCount?: number
 }
 
@@ -26,7 +26,7 @@ export default function FileMetadata({
           <div className="flex-1">
             <div className="font-medium text-gray-900">{filename}</div>
             <div className="text-xs text-gray-500 mt-1">
-              Uploaded: {new Date(uploadedAt).toLocaleString('sv-SE')}
+              Uploaded: {uploadedAt ? new Date(uploadedAt).toLocaleString('sv-SE') : '—'}
             </div>
           </div>
         </div>

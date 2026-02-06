@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 import json
 from pydantic import BaseModel
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import re
 import threading
 import tempfile
@@ -3130,48 +3130,62 @@ async def get_file_dimensions(week: str = Query(...)):
 
 @app.get("/api/file-metadata")
 async def get_file_metadata(week: str = Query(...)):
-    """Get metadata for all data files in a specific week - only check if files exist."""
+    """Get metadata for all data files in a specific week (from local disk or Supabase Storage)."""
     try:
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        
+
         config = get_data_config(week)
         raw_path = config.raw_data_path
-        
+
         metadata = {}
         file_hashes = []
         for file_type in ["qlik", "dema_spend", "dema_gm2", "shopify"]:
             type_path = raw_path / file_type
             if type_path.exists():
                 files = list(type_path.glob("*.*"))
-                # Filter out hidden files (.DS_Store, etc.)
-                files = [f for f in files if not f.name.startswith('.')]
+                files = [f for f in files if not f.name.startswith(".")]
                 if files:
-                    # Get the most recently modified file
                     latest_file = max(files, key=lambda f: f.stat().st_mtime)
-                    # Only return basic file info - don't read the entire file
                     metadata[file_type] = {
                         "filename": latest_file.name,
-                        "uploaded_at": datetime.fromtimestamp(latest_file.stat().st_mtime).isoformat()
+                        "uploaded_at": datetime.fromtimestamp(latest_file.stat().st_mtime).isoformat(),
                     }
-                    # Add file hash for ETag
                     file_hashes.append(f"{file_type}:{latest_file.name}:{latest_file.stat().st_mtime}")
-        
-        # Generate ETag from file metadata
+
+        # When data lives only in Supabase Storage (e.g. Railway), fill from Storage so "Current Files" shows them
+        try:
+            from weekly_report.src.adapters.supabase_storage import list_week_files_with_metadata
+            _, storage_files = list_week_files_with_metadata(week)
+            # Group by file_type and pick one file per type (first); only for types we don't have locally
+            by_type: Dict[str, Tuple[str, Optional[str]]] = {}
+            for ft, fname, updated_at in storage_files:
+                if ft not in by_type and ft in ("qlik", "dema_spend", "dema_gm2", "shopify"):
+                    by_type[ft] = (fname, updated_at)
+            for file_type in ["qlik", "dema_spend", "dema_gm2", "shopify"]:
+                if file_type not in metadata and file_type in by_type:
+                    fname, updated_at = by_type[file_type]
+                    metadata[file_type] = {
+                        "filename": fname,
+                        "uploaded_at": updated_at,
+                    }
+                    file_hashes.append(f"storage:{file_type}:{fname}:{updated_at or ''}")
+        except Exception as e:
+            logger.debug(f"File metadata Storage fallback for {week}: {e}")
+
         etag_content = f"{week}:{':'.join(file_hashes)}"
         etag = hashlib.md5(etag_content.encode()).hexdigest()
-        
-        # Create response with caching headers
+
         response = Response(
             content=json.dumps(metadata),
             media_type="application/json",
             headers={
-                "Cache-Control": "public, max-age=600",  # Cache for 10 minutes
-                "ETag": etag
-            }
+                "Cache-Control": "public, max-age=600",
+                "ETag": etag,
+            },
         )
         return response
-        
+
     except HTTPException:
         raise
     except Exception as e:

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -52,6 +52,13 @@ export default function Settings() {
       setWeekAliases(al.aliases || {})
     }).catch(() => {})
   }, [])
+
+  // Weeks that have data: from Supabase or via alias (so 2026-04 shows "Has data" when 2026-04 → 2026-05)
+  const effectiveWeeksWithData = useMemo(() => {
+    const set = new Set(weeksWithData ?? [])
+    Object.keys(weekAliases).forEach((w) => set.add(w))
+    return set
+  }, [weeksWithData, weekAliases])
 
   // Sync selectedWeek with baseWeek from context
   useEffect(() => {
@@ -263,16 +270,16 @@ export default function Settings() {
           <div>
             <div className="flex items-center gap-3 mb-3">
               <h3 className="text-sm font-medium">Select Week</h3>
-              {selectedWeek && weeksWithData != null && (
+              {selectedWeek && (
                 <span
                   className={`text-xs font-medium px-2 py-0.5 rounded ${
-                    weeksWithData.has(selectedWeek)
+                    effectiveWeeksWithData.has(selectedWeek)
                       ? 'bg-green-100 text-green-800'
                       : 'bg-amber-100 text-amber-800'
                   }`}
-                  title={weeksWithData.has(selectedWeek) ? 'Data loaded for this week' : 'No data uploaded for this week yet'}
+                  title={effectiveWeeksWithData.has(selectedWeek) ? 'Data loaded for this week' : 'No data uploaded for this week yet'}
                 >
-                  {weeksWithData.has(selectedWeek) ? 'Has data' : 'No data'}
+                  {effectiveWeeksWithData.has(selectedWeek) ? 'Has data' : 'No data'}
                 </span>
               )}
             </div>
@@ -283,7 +290,7 @@ export default function Settings() {
                 setBaseWeek(week || '')
               }}
               onPeriodsChange={(p) => setPeriods(p as any)}
-              weeksWithData={weeksWithData}
+              weeksWithData={effectiveWeeksWithData}
             />
           </div>
 

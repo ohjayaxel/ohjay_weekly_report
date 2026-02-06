@@ -13,9 +13,16 @@ export default function LayoutContent({ children }: { children: React.ReactNode 
   const [weeksWithData, setWeeksWithData] = useState<Set<string> | null>(null)
 
   useEffect(() => {
-    import('@/lib/supabase-queries')
-      .then((m) => m.getWeeksWithDataFromSupabase())
-      .then((weeks) => setWeeksWithData(new Set(weeks)))
+    const load = async () => {
+      const [supabaseWeeks, aliasesRes] = await Promise.all([
+        import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()),
+        import('@/lib/api').then((m) => m.getWeekAliases()).catch(() => ({ aliases: {} as Record<string, string> })),
+      ])
+      const set = new Set(supabaseWeeks)
+      if (aliasesRes?.aliases) Object.keys(aliasesRes.aliases).forEach((w) => set.add(w))
+      setWeeksWithData(set)
+    }
+    load()
   }, [])
   const searchParams = useSearchParams()
   const pathname = usePathname()

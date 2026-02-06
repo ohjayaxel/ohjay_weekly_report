@@ -1025,7 +1025,18 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           return
         }
         
-        const supabaseMetrics = await loadWeeklyReportMetricsFromSupabase(loadForWeek)
+        // If this week uses another week's data (alias), load from the source week in Supabase
+        let effectiveWeek = loadForWeek
+        try {
+          const { getWeekAliases } = await import('@/lib/api')
+          const { aliases } = await getWeekAliases()
+          if (aliases?.[loadForWeek]) {
+            effectiveWeek = aliases[loadForWeek]
+            console.debug(`Loading data for ${loadForWeek} from alias source ${effectiveWeek}`)
+          }
+        } catch (_) { /* no backend or aliases */ }
+        
+        const supabaseMetrics = await loadWeeklyReportMetricsFromSupabase(effectiveWeek)
         if (isStale()) return
         
         if (supabaseMetrics) {

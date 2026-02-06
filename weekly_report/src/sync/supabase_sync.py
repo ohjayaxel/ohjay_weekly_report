@@ -125,8 +125,10 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         # Compute metrics if not cached or hashes don't match
         if not cached_metrics:
             try:
-                logger.info(f"Computing all weekly report metrics for {week} (from data week {config.week})...")
-                all_metrics = calculate_all_metrics(config.week, config.data_root, num_weeks)
+                logger.info(f"Computing all weekly report metrics for {week} (data: {config.week}, report: {week})...")
+                all_metrics = calculate_all_metrics(
+                    config.week, config.data_root, num_weeks, report_week=week
+                )
                 
                 # Map to Supabase format
                 weekly_metrics_row = map_batch_metrics_to_supabase(

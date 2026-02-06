@@ -2588,10 +2588,11 @@ async def get_batch_all_metrics(
             except Exception as alias_err:
                 logger.debug(f"Alias Supabase fallback: {alias_err}")
         
-        # Fallback: Compute metrics (use data_week path so alias works when files exist)
+        # Fallback: Compute metrics (data from config.week, report for base_week when aliased)
         config = get_data_config(base_week)
-        logger.info(f"Computing batch metrics for {base_week} (data from {config.week}) with {num_weeks} weeks")
-        all_metrics = calculate_all_metrics(config.week, config.data_root, num_weeks)
+        report_week = base_week if config.week != base_week else None
+        logger.info(f"Computing batch metrics for {base_week} (data: {config.week}, report: {base_week}) with {num_weeks} weeks")
+        all_metrics = calculate_all_metrics(config.week, config.data_root, num_weeks, report_week=report_week)
         
         # Save to Supabase for future use (async, don't block)
         try:

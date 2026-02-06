@@ -525,13 +525,19 @@ def calculate_table1_metrics_for_date_range(
     return metrics
 
 
-def calculate_table1_for_periods_with_ytd(periods: Dict[str, str], data_root: Path) -> Dict[str, Dict[str, Any]]:
+def calculate_table1_for_periods_with_ytd(
+    periods: Dict[str, str],
+    data_root: Path,
+    data_week: str | None = None,
+) -> Dict[str, Dict[str, Any]]:
     """
     Calculate Table 1 metrics for multiple periods INCLUDING YTD columns.
     
     Args:
         periods: Dictionary with period mappings (from get_periods_for_week)
         data_root: Root data directory
+        data_week: If set (e.g. when aliasing), load raw data from this week's folder
+            instead of periods['actual']; periods are still used for filtering.
         
     Returns:
         Dictionary with metrics for each period including YTD:
@@ -548,14 +554,13 @@ def calculate_table1_for_periods_with_ytd(periods: Dict[str, str], data_root: Pa
     
     logger.info(f"Calculating Table 1 metrics for {len(periods)} periods + YTD")
     
-    # Get base week from periods
+    # Report base week (for YTD); load data from data_week folder when aliasing
     base_week = periods['actual']
-    
-    # Load all raw data for the base week
-    latest_data_path = data_root / "raw" / base_week
+    load_week = data_week if data_week else base_week
+    latest_data_path = data_root / "raw" / load_week
     
     try:
-        logger.info(f"Loading all raw data sources for week {base_week} from {latest_data_path}...")
+        logger.info(f"Loading all raw data sources from {latest_data_path} (report base {base_week})...")
         all_raw_data = load_all_raw_data(latest_data_path)
         logger.info("Successfully loaded all raw data")
     except Exception as e:

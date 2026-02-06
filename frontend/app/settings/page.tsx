@@ -33,6 +33,9 @@ export default function Settings() {
   const [copyTo, setCopyTo] = useState('')
   const [aliasActionLoading, setAliasActionLoading] = useState(false)
   const [aliasActionMessage, setAliasActionMessage] = useState<string | null>(null)
+  const [generateTarget, setGenerateTarget] = useState<string | null>(null)
+  const [generateLoading, setGenerateLoading] = useState(false)
+  const [generatingForTarget, setGeneratingForTarget] = useState<string | null>(null)
 
   useEffect(() => {
     import('@/lib/supabase-queries')
@@ -339,7 +342,8 @@ export default function Settings() {
                     const { setWeekAlias } = await import('@/lib/api')
                     await setWeekAlias(copyTo, copyFrom)
                     setWeekAliases((prev) => ({ ...prev, [copyTo]: copyFrom }))
-                    setAliasActionMessage(`Week ${copyTo} will use data from ${copyFrom}.`)
+                    setAliasActionMessage(`Week ${copyTo} will use data from ${copyFrom}. Generate reports to compute and save.`)
+                    setGenerateTarget(copyTo)
                     setCopyTo('')
                     setCopyFrom('')
                     await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
@@ -359,13 +363,62 @@ export default function Settings() {
                 {aliasActionMessage}
               </p>
             )}
+            {generateTarget && (
+              <div className="mt-3 flex items-center gap-2">
+                <Button
+                  onClick={async () => {
+                    setAliasActionMessage(null)
+                    setGenerateLoading(true)
+                    try {
+                      const { syncSupabase } = await import('@/lib/api')
+                      await syncSupabase(generateTarget, 8)
+                      setAliasActionMessage(`Reports generated for ${generateTarget}. You can now select that week to view.`)
+                      setGenerateTarget(null)
+                      await refreshData()
+                      await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
+                    } catch (e: any) {
+                      setAliasActionMessage(e?.message || 'Failed to generate reports')
+                    } finally {
+                      setGenerateLoading(false)
+                    }
+                  }}
+                  disabled={generateLoading}
+                >
+                  {generateLoading ? 'Generating…' : `Generate reports for ${generateTarget}`}
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => { setGenerateTarget(null); setAliasActionMessage(null) }}>Dismiss</Button>
+              </div>
+            )}
             {Object.keys(weekAliases).length > 0 && (
               <div className="mt-3">
                 <p className="text-xs font-medium text-gray-600 mb-1">Current aliases (report week → data from)</p>
                 <ul className="text-xs text-gray-600 space-y-1">
                   {Object.entries(weekAliases).map(([target, source]) => (
-                    <li key={target} className="flex items-center gap-2">
+                    <li key={target} className="flex items-center gap-2 flex-wrap">
                       <span>{target} → {source}</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 px-2 text-xs"
+                        onClick={async () => {
+                          setAliasActionMessage(null)
+                          setGeneratingForTarget(target)
+                          try {
+                            const { syncSupabase } = await import('@/lib/api')
+                            await syncSupabase(target, 8)
+                            setAliasActionMessage(`Reports generated for ${target}.`)
+                            await refreshData()
+                            await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
+                          } catch (e: any) {
+                            setAliasActionMessage(e?.message || 'Failed to generate')
+                          } finally {
+                            setGeneratingForTarget(null)
+                          }
+                        }}
+                        disabled={generatingForTarget !== null}
+                      >
+                        {generatingForTarget === target ? 'Generating…' : 'Generate reports'}
+                      </Button>
                       <Button
                         variant="ghost"
                         size="sm"

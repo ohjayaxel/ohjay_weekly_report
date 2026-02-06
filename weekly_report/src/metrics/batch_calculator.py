@@ -30,26 +30,32 @@ from weekly_report.src.metrics.total_contribution_per_country import calculate_t
 from weekly_report.src.periods.calculator import get_periods_for_week
 
 
-def calculate_all_metrics(base_week: str, data_root: Path, num_weeks: int = 8) -> Dict[str, Any]:
+def calculate_all_metrics(
+    data_week: str,
+    data_root: Path,
+    num_weeks: int = 8,
+    report_week: str | None = None,
+) -> Dict[str, Any]:
     """
     Calculate all metrics in a single batch using shared data loading.
     
-    This function loads raw data once and reuses it across all metric calculations,
-    eliminating redundant data loading and improving performance.
-    
     Args:
-        base_week: Base ISO week string like '2025-42'
-        data_root: Root data directory
-        num_weeks: Number of weeks to analyze (default: 8)
+        data_week: ISO week whose raw data to load (data_root/raw/data_week).
+        data_root: Root data directory.
+        num_weeks: Number of weeks to analyze (default: 8).
+        report_week: If set (e.g. when aliasing), periods and labels use this week;
+            data is still loaded from data_week. Use for "use week 5 files, report for week 4".
         
     Returns:
-        Dictionary containing all calculated metrics
+        Dictionary containing all calculated metrics.
     """
+    if report_week is None:
+        report_week = data_week
     
-    logger.info(f"Starting unified batch calculation for {base_week}")
+    logger.info(f"Starting unified batch calculation (data: {data_week}, report: {report_week})")
     
-    # Calculate periods once
-    periods = get_periods_for_week(base_week)
+    # Periods for the report week (so "actual" = report_week, etc.)
+    periods = get_periods_for_week(report_week)
     
     results = {
         'periods': periods,
@@ -79,123 +85,71 @@ def calculate_all_metrics(base_week: str, data_root: Path, num_weeks: int = 8) -
     }
     
     try:
-        # 1. Calculate periods and table1 metrics (WITH YTD)
+        # 1. Calculate periods and table1 metrics (WITH YTD) – periods for report_week, load from data_week when aliasing
         logger.info("Calculating periods and table1 metrics with YTD...")
-        metrics_data = calculate_table1_for_periods_with_ytd(periods, data_root)
+        metrics_data = calculate_table1_for_periods_with_ytd(
+            periods, data_root, data_week=(data_week if report_week != data_week else None)
+        )
         results['metrics'] = metrics_data
         
-        # 2. Calculate top markets
+        # 2. Calculate top markets (load from data_week path)
         logger.info("Calculating top markets...")
-        markets_data = calculate_top_markets_for_weeks(base_week, num_weeks, data_root)
+        markets_data = calculate_top_markets_for_weeks(data_week, num_weeks, data_root)
         results['markets'] = markets_data
         
-        # 3. Calculate online KPIs
+        # 3–23: all load from data_week path
         logger.info("Calculating online KPIs...")
-        kpis_data = calculate_online_kpis_for_weeks(base_week, num_weeks, data_root)
-        results['kpis'] = kpis_data
-        
-        # 4. Calculate contribution
+        results['kpis'] = calculate_online_kpis_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating contribution...")
-        contribution_data = calculate_contribution_for_weeks(base_week, num_weeks, data_root)
-        results['contribution'] = contribution_data
-        
-        # 5. Calculate gender sales
+        results['contribution'] = calculate_contribution_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating gender sales...")
-        gender_sales_data = calculate_gender_sales_for_weeks(base_week, num_weeks, data_root)
-        results['gender_sales'] = gender_sales_data
-        
-        # 6. Calculate men category sales
+        results['gender_sales'] = calculate_gender_sales_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating men category sales...")
-        men_category_data = calculate_men_category_sales_for_weeks(base_week, num_weeks, data_root)
-        results['men_category_sales'] = men_category_data
-        
-        # 7. Calculate women category sales
+        results['men_category_sales'] = calculate_men_category_sales_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating women category sales...")
-        women_category_data = calculate_women_category_sales_for_weeks(base_week, num_weeks, data_root)
-        results['women_category_sales'] = women_category_data
-        
-        # 8. Calculate category sales
+        results['women_category_sales'] = calculate_women_category_sales_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating category sales...")
-        category_data = calculate_category_sales_for_weeks(base_week, num_weeks, data_root)
-        results['category_sales'] = category_data
-        
-        # 9. Calculate top products (new/returning)
+        results['category_sales'] = calculate_category_sales_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating top products...")
-        products_new_data = calculate_top_products_for_weeks(base_week, 1, data_root)
-        results['products_new'] = products_new_data
-        
-        # 10. Calculate top products (gender) – both men and women
-        logger.info("Calculating top products by gender...")
-        products_gender_men = calculate_top_products_by_gender_for_weeks(base_week, 1, data_root, 'men')
-        products_gender_women = calculate_top_products_by_gender_for_weeks(base_week, 1, data_root, 'women')
+        results['products_new'] = calculate_top_products_for_weeks(data_week, 1, data_root)
+        products_gender_men = calculate_top_products_by_gender_for_weeks(data_week, 1, data_root, 'men')
+        products_gender_women = calculate_top_products_by_gender_for_weeks(data_week, 1, data_root, 'women')
         results['products_gender'] = {'men': products_gender_men, 'women': products_gender_women}
-        
-        # 11. Calculate sessions per country
         logger.info("Calculating sessions per country...")
-        sessions_data = calculate_sessions_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['sessions_per_country'] = sessions_data
-        
-        # 12. Calculate conversion per country
+        results['sessions_per_country'] = calculate_sessions_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating conversion per country...")
-        conversion_data = calculate_conversion_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['conversion_per_country'] = conversion_data
-        
-        # 13. Calculate new customers per country
+        results['conversion_per_country'] = calculate_conversion_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating new customers per country...")
-        new_customers_data = calculate_new_customers_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['new_customers_per_country'] = new_customers_data
-        
-        # 14. Calculate returning customers per country
+        results['new_customers_per_country'] = calculate_new_customers_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating returning customers per country...")
-        returning_customers_data = calculate_returning_customers_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['returning_customers_per_country'] = returning_customers_data
-        
-        # 15. Calculate AOV for new customers per country
-        logger.info("Calculating AOV for new customers per country...")
-        aov_new_data = calculate_aov_new_customers_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['aov_new_customers_per_country'] = aov_new_data
-        
-        # 16. Calculate AOV for returning customers per country
-        logger.info("Calculating AOV for returning customers per country...")
-        aov_returning_data = calculate_aov_returning_customers_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['aov_returning_customers_per_country'] = aov_returning_data
-        
-        # 17. Calculate marketing spend per country
+        results['returning_customers_per_country'] = calculate_returning_customers_per_country_for_weeks(data_week, num_weeks, data_root)
+        logger.info("Calculating AOV new customers per country...")
+        results['aov_new_customers_per_country'] = calculate_aov_new_customers_per_country_for_weeks(data_week, num_weeks, data_root)
+        logger.info("Calculating AOV returning customers per country...")
+        results['aov_returning_customers_per_country'] = calculate_aov_returning_customers_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating marketing spend per country...")
-        marketing_spend_data = calculate_marketing_spend_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['marketing_spend_per_country'] = marketing_spend_data
-        
-        # 18. Calculate nCAC per country
+        results['marketing_spend_per_country'] = calculate_marketing_spend_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating nCAC per country...")
-        ncac_data = calculate_ncac_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['ncac_per_country'] = ncac_data
-        
-        # 19. Calculate contribution new per country
+        results['ncac_per_country'] = calculate_ncac_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating contribution new per country...")
-        contribution_new_data = calculate_contribution_new_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['contribution_new_per_country'] = contribution_new_data
-        
-        # 20. Calculate contribution new total per country
+        results['contribution_new_per_country'] = calculate_contribution_new_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating contribution new total per country...")
-        contribution_new_total_data = calculate_contribution_new_total_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['contribution_new_total_per_country'] = contribution_new_total_data
-        
-        # 21. Calculate contribution returning per country
+        results['contribution_new_total_per_country'] = calculate_contribution_new_total_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating contribution returning per country...")
-        contribution_returning_data = calculate_contribution_returning_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['contribution_returning_per_country'] = contribution_returning_data
-        
-        # 22. Calculate contribution returning total per country
+        results['contribution_returning_per_country'] = calculate_contribution_returning_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating contribution returning total per country...")
-        contribution_returning_total_data = calculate_contribution_returning_total_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['contribution_returning_total_per_country'] = contribution_returning_total_data
-        
-        # 23. Calculate total contribution per country
+        results['contribution_returning_total_per_country'] = calculate_contribution_returning_total_per_country_for_weeks(data_week, num_weeks, data_root)
         logger.info("Calculating total contribution per country...")
-        total_contribution_data = calculate_total_contribution_per_country_for_weeks(base_week, num_weeks, data_root)
-        results['total_contribution_per_country'] = total_contribution_data
+        results['total_contribution_per_country'] = calculate_total_contribution_per_country_for_weeks(data_week, num_weeks, data_root)
         
-        logger.info(f"Successfully completed batch calculation for {base_week}")
+        # When reporting for a different week than data, set latest_week in period_info to report_week
+        if report_week != data_week:
+            for key in list(results.keys()):
+                val = results.get(key)
+                if isinstance(val, dict) and 'period_info' in val and isinstance(val['period_info'], dict):
+                    results[key] = {**val, 'period_info': {**val['period_info'], 'latest_week': report_week}}
+        
+        logger.info(f"Successfully completed batch calculation for {report_week}")
         
     except Exception as e:
         logger.error(f"Error during batch calculation: {e}")

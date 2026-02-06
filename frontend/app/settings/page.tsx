@@ -11,7 +11,7 @@ import { Separator } from '@/components/ui/separator'
 import { useDataCache } from '@/contexts/DataCacheContext'
 import { useChartSettings } from '@/contexts/ChartSettingsContext'
 import { RefreshCw, CheckCircle2, XCircle } from 'lucide-react'
-import { hasBackend } from '@/lib/api'
+import { hasBackend, getSyncStatus } from '@/lib/api'
 const METADATA_CACHE_EXPIRY = 10 * 60 * 1000 // 10 minutes
 const DIMENSIONS_CACHE_EXPIRY = 10 * 60 * 1000 // 10 minutes
 
@@ -36,6 +36,64 @@ export default function Settings() {
   const [generateTarget, setGenerateTarget] = useState<string | null>(null)
   const [generateLoading, setGenerateLoading] = useState(false)
   const [generatingForTarget, setGeneratingForTarget] = useState<string | null>(null)
+  const settingsSyncPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const pollSyncUntilDone = useCallback((
+    week: string,
+    setMessage: (msg: string) => void,
+    onDone: () => void | Promise<void>,
+    onFailed: (err: string) => void
+  ) => {
+    if (settingsSyncPollRef.current) {
+      clearInterval(settingsSyncPollRef.current)
+      settingsSyncPollRef.current = null
+    }
+    const SYNC_POLL_MS = 2000
+    const SYNC_TIMEOUT_MS = 5 * 60 * 1000
+    const startedAt = Date.now()
+    settingsSyncPollRef.current = setInterval(async () => {
+      if (Date.now() - startedAt > SYNC_TIMEOUT_MS) {
+        if (settingsSyncPollRef.current) {
+          clearInterval(settingsSyncPollRef.current)
+          settingsSyncPollRef.current = null
+        }
+        setMessage('Sync timed out. Try again or refresh in a minute.')
+        onFailed('Timeout')
+        return
+      }
+      try {
+        const status = await getSyncStatus(week)
+        if (status.status === 'running') {
+          setMessage(`${status.message} (${status.progress}%)`)
+        } else if (status.status === 'done') {
+          if (settingsSyncPollRef.current) {
+            clearInterval(settingsSyncPollRef.current)
+            settingsSyncPollRef.current = null
+          }
+          setMessage(`Reports generated for ${week}.`)
+          await onDone()
+        } else if (status.status === 'failed') {
+          if (settingsSyncPollRef.current) {
+            clearInterval(settingsSyncPollRef.current)
+            settingsSyncPollRef.current = null
+          }
+          setMessage(status.error || 'Sync failed')
+          onFailed(status.error || 'Sync failed')
+        }
+      } catch (e) {
+        console.warn('Sync status poll failed:', e)
+      }
+    }, SYNC_POLL_MS)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (settingsSyncPollRef.current) {
+        clearInterval(settingsSyncPollRef.current)
+        settingsSyncPollRef.current = null
+      }
+    }
+  }, [])
 
   // "Has data" = filer finns i Supabase (Storage). Backend returnerar veckor med filer (disk + Storage).
   useEffect(() => {
@@ -374,24 +432,49 @@ export default function Settings() {
                   onClick={async () => {
                     setAliasActionMessage(null)
                     setGenerateLoading(true)
+                    const target = generateTarget
                     try {
                       const { syncSupabase } = await import('@/lib/api')
-                      await syncSupabase(generateTarget, 8)
-                      setAliasActionMessage(`Reports generated for ${generateTarget}. You can now select that week to view.`)
-                      setGenerateTarget(null)
-                      await refreshData()
-                      if (hasBackend) {
-                        const { getWeeksWithFiles } = await import('@/lib/api')
-                        const r = await getWeeksWithFiles()
-                        setWeeksWithData(new Set(r.weeks || []))
+                      const syncResult = await syncSupabase(target, 8)
+                      const bg = (syncResult as { _accepted?: boolean })._accepted
+                      if (bg) {
+                        setAliasActionMessage(syncResult.message || `Sync started for ${target}...`)
+                        pollSyncUntilDone(
+                          target,
+                          setAliasActionMessage,
+                          async () => {
+                            setGenerateTarget(null)
+                            await refreshData()
+                            if (hasBackend) {
+                              const { getWeeksWithFiles } = await import('@/lib/api')
+                              const r = await getWeeksWithFiles()
+                              setWeeksWithData(new Set(r.weeks || []))
+                            } else {
+                              const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                              const weeks = await getWeeksWithDataFromSupabase()
+                              setWeeksWithData(new Set(weeks))
+                            }
+                            setGenerateLoading(false)
+                          },
+                          () => setGenerateLoading(false)
+                        )
                       } else {
-                        const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
-                        const weeks = await getWeeksWithDataFromSupabase()
-                        setWeeksWithData(new Set(weeks))
+                        setAliasActionMessage(`Reports generated for ${target}. You can now select that week to view.`)
+                        setGenerateTarget(null)
+                        await refreshData()
+                        if (hasBackend) {
+                          const { getWeeksWithFiles } = await import('@/lib/api')
+                          const r = await getWeeksWithFiles()
+                          setWeeksWithData(new Set(r.weeks || []))
+                        } else {
+                          const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                          const weeks = await getWeeksWithDataFromSupabase()
+                          setWeeksWithData(new Set(weeks))
+                        }
+                        setGenerateLoading(false)
                       }
                     } catch (e: any) {
                       setAliasActionMessage(e?.message || 'Failed to generate reports')
-                    } finally {
                       setGenerateLoading(false)
                     }
                   }}
@@ -418,21 +501,44 @@ export default function Settings() {
                           setGeneratingForTarget(target)
                           try {
                             const { syncSupabase } = await import('@/lib/api')
-                            await syncSupabase(target, 8)
-                            setAliasActionMessage(`Reports generated for ${target}.`)
-                            await refreshData()
-                            if (hasBackend) {
-                              const { getWeeksWithFiles } = await import('@/lib/api')
-                              const r = await getWeeksWithFiles()
-                              setWeeksWithData(new Set(r.weeks || []))
+                            const syncResult = await syncSupabase(target, 8)
+                            const bg = (syncResult as { _accepted?: boolean })._accepted
+                            if (bg) {
+                              setAliasActionMessage(syncResult.message || `Sync started for ${target}...`)
+                              pollSyncUntilDone(
+                                target,
+                                setAliasActionMessage,
+                                async () => {
+                                  await refreshData()
+                                  if (hasBackend) {
+                                    const { getWeeksWithFiles } = await import('@/lib/api')
+                                    const r = await getWeeksWithFiles()
+                                    setWeeksWithData(new Set(r.weeks || []))
+                                  } else {
+                                    const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                                    const weeks = await getWeeksWithDataFromSupabase()
+                                    setWeeksWithData(new Set(weeks))
+                                  }
+                                  setGeneratingForTarget(null)
+                                },
+                                () => setGeneratingForTarget(null)
+                              )
                             } else {
-                              const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
-                              const weeks = await getWeeksWithDataFromSupabase()
-                              setWeeksWithData(new Set(weeks))
+                              setAliasActionMessage(`Reports generated for ${target}.`)
+                              await refreshData()
+                              if (hasBackend) {
+                                const { getWeeksWithFiles } = await import('@/lib/api')
+                                const r = await getWeeksWithFiles()
+                                setWeeksWithData(new Set(r.weeks || []))
+                              } else {
+                                const { getWeeksWithDataFromSupabase } = await import('@/lib/supabase-queries')
+                                const weeks = await getWeeksWithDataFromSupabase()
+                                setWeeksWithData(new Set(weeks))
+                              }
+                              setGeneratingForTarget(null)
                             }
                           } catch (e: any) {
                             setAliasActionMessage(e?.message || 'Failed to generate')
-                          } finally {
                             setGeneratingForTarget(null)
                           }
                         }}

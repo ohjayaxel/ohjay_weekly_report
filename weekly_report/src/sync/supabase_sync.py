@@ -1,12 +1,14 @@
 """Supabase sync function that can be called from CLI or API."""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 import uuid
 import time
 import json
 
 from loguru import logger
+
+ProgressCallback = Optional[Callable[[int, str], None]]
 
 from weekly_report.src.adapters.supabase_client import get_supabase_client
 from weekly_report.src.config import load_config
@@ -23,24 +25,37 @@ from weekly_report.src.metrics.batch_calculator import calculate_all_metrics
 from weekly_report.src.utils.file_hashes import get_file_hashes_for_week, hashes_match
 
 
-def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> Dict[str, Any]:
+def sync_supabase_data(
+    base_week: Optional[str] = None,
+    num_weeks: int = 8,
+    progress_callback: ProgressCallback = None,
+) -> Dict[str, Any]:
     """
     Sync precomputed report data to Supabase for read-optimized frontend access.
-    
+
     Args:
         base_week: ISO week format (YYYY-WW). If None, uses default from config.
         num_weeks: Number of weeks to analyze (default: 8)
-    
+        progress_callback: Optional (progress_pct: int, message: str) for status updates.
+
     Returns:
         Dict with 'success', 'row_counts', 'elapsed_seconds', and optionally 'error'
     """
+    def report(progress: int, message: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(progress, message)
+            except Exception:
+                pass
+
     start_time = time.time()
-    
+
     # Use aliased week for reading data; store in Supabase under base_week (requested week)
     data_week = resolve_data_week(base_week or "")
     config = load_config(week=data_week)
     week = base_week or config.week  # store under requested week so frontend finds it
-    
+
+    report(0, "Starting...")
     logger.info(f"Starting Supabase sync for week {week} (data from {data_week})")
     
     # Initialize Supabase client
@@ -87,10 +102,13 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
             }
         except Exception as e:
             logger.warning(f"ensure_week_raw_data: {e} (continuing with existing files)")
-        
+
+        report(15, "Files ready")
+
         # Calculate current file hashes (from data_week folder)
         current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
         logger.info(f"File hashes for data week {config.week}: {list(current_file_hashes.keys())}")
+        report(20, "Checking cache...")
         
         # Check if cached metrics exist and file hashes match
         cached_metrics = None
@@ -132,6 +150,7 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 
                 if hashes_match_result and has_ytd_data:
                     cached_metrics = cached_row
+                    report(75, "Using cache")
                 else:
                     if not hashes_match_result:
                         logger.info(f"⚠️ File hashes changed for week {week} - will recompute metrics")
@@ -143,11 +162,13 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         # Compute metrics if not cached or hashes don't match
         if not cached_metrics:
             try:
+                report(25, "Computing metrics...")
                 logger.info(f"Computing all weekly report metrics for {week} (data: {config.week}, report: {week})...")
                 all_metrics = calculate_all_metrics(
                     config.week, config.data_root, num_weeks, report_week=week
                 )
                 
+                report(70, "Saving metrics...")
                 # Map to Supabase format
                 weekly_metrics_row = map_batch_metrics_to_supabase(
                     base_week=week,
@@ -181,6 +202,7 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                         raise ValueError(f"Data verification failed: upsert succeeded but data not found in Supabase")
                     
                     row_counts["weekly_report_metrics"] = 1
+                    report(75, "Metrics saved")
                     logger.info(f"✅ Saved weekly report metrics to Supabase for week {week}")
                 except Exception as upsert_error:
                     logger.error(f"❌ Upsert failed: {upsert_error}")
@@ -195,6 +217,7 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 raise  # Re-raise to fail the entire sync
         
         # Step 1: Compute and sync Budget General (read from data_week, store under requested week)
+        report(78, "Budget data...")
         logger.info("Computing Budget General...")
         budget_data = compute_budget_general(config.week)
         if not budget_data or "error" in budget_data:
@@ -217,6 +240,7 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 row_counts["budget_general_totals"] = len(budget_totals)
                 logger.info(f"Upserted {len(budget_totals)} budget general totals")
         
+        report(82, "Actuals...")
         # Step 2: Compute and sync Actuals General (read from data_week, store under requested week)
         logger.info("Computing Actuals General...")
         actuals_data = compute_actuals_general(config.week)
@@ -239,6 +263,7 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 row_counts["budget_general_totals_actuals"] = len(actuals_totals)
                 logger.info(f"Upserted {len(actuals_totals)} actuals general totals")
         
+        report(86, "Markets...")
         # Step 3: Compute and sync Actuals Markets Detailed (read from data_week, store under requested week)
         logger.info("Computing Actuals Markets Detailed...")
         markets_data = compute_actuals_markets_detailed(config.week)
@@ -261,10 +286,11 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 row_counts["budget_markets_totals"] = len(markets_totals)
                 logger.info(f"Upserted {len(markets_totals)} markets totals")
         
+        report(95, "Finalizing...")
         # Record successful sync
         sync_finished = datetime.utcnow()
         elapsed = (sync_finished - sync_started).total_seconds()
-        
+
         # Schema has row_counts JSONB (no 'details' column). Store counts + elapsed in row_counts.
         supabase.table("sync_runs").insert({
             "id": sync_id,
@@ -275,9 +301,10 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
             "row_counts": { "elapsed_seconds": elapsed, **row_counts }
         }).execute()
         
+        report(100, "Sync complete")
         logger.success(f"Sync completed successfully in {elapsed:.2f} seconds")
         logger.info(f"Row counts: {row_counts}")
-        
+
         return {
             "success": True,
             "row_counts": row_counts,

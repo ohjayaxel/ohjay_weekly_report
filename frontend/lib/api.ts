@@ -849,11 +849,11 @@ export async function verifySupabase(): Promise<{
   return response.json()
 }
 
-/** Sync precomputed metrics for the given week to Supabase (backend computes and saves). Call when user clicks "Refresh all data". */
+/** Sync precomputed metrics for the given week to Supabase (backend computes and saves). Returns 202 when sync runs in background. */
 export async function syncSupabase(
   baseWeek: string,
   numWeeks: number = 8
-): Promise<{ success: boolean; week: string; row_counts?: Record<string, number>; elapsed_seconds?: number; sync_id?: string; error?: string }> {
+): Promise<{ success: boolean; week: string; message?: string; row_counts?: Record<string, number>; elapsed_seconds?: number; sync_id?: string; error?: string }> {
   if (!hasBackend) {
     throw new Error(
       'Backend not configured. Sync is only available when NEXT_PUBLIC_API_URL is set. Run sync locally and data will appear in production from Supabase.'
@@ -867,7 +867,32 @@ export async function syncSupabase(
   if (!response.ok) {
     throw new Error(data?.detail || data?.error || `Sync failed: ${response.statusText}`)
   }
-  return data
+  return { ...data, _accepted: response.status === 202 }
+}
+
+/** Sync status for polling during background sync. */
+export interface SyncStatusResponse {
+  status: 'idle' | 'running' | 'done' | 'failed'
+  progress: number
+  message: string
+  error: string | null
+  updated_at: string | null
+}
+
+/** Get current sync status for a week (poll this after starting background sync). */
+export async function getSyncStatus(
+  week: string
+): Promise<SyncStatusResponse> {
+  if (!hasBackend) {
+    return { status: 'idle', progress: 0, message: '', error: null, updated_at: null }
+  }
+  const response = await fetch(
+    `${API_BASE_URL}/api/sync-status?week=${encodeURIComponent(week)}`
+  )
+  if (!response.ok) {
+    throw new Error(`Sync status failed: ${response.statusText}`)
+  }
+  return response.json()
 }
 
 export interface DiscountsMonthlyResponse {

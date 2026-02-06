@@ -30,6 +30,7 @@ import {
   getBudgetRaw,
   getActualsMarkets,
   getActualsMarketsDetailed,
+  getSyncStatus,
   type PeriodsResponse,
   type MetricsResponse,
   type MarketsResponse,
@@ -177,6 +178,8 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
   const [isDataReady, setIsDataReady] = useState(false)
   /** Ref to invalidate in-flight passive Supabase loads when baseWeek changes or a new load starts (so stale load cannot overwrite state). */
   const passiveLoadWeekRef = useRef<string | null>(null)
+  /** Ref for sync status polling interval (clear on unmount or when sync completes). */
+  const syncPollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
   
   // Wrap setBaseWeek to also save to localStorage (empty string = no week selected)
   const setBaseWeek = useCallback((week: string) => {
@@ -275,16 +278,84 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
           })
           try {
             const { syncSupabase } = await import('@/lib/api')
-            await syncSupabase(week, 8)
+            if (syncPollingRef.current) {
+              clearInterval(syncPollingRef.current)
+              syncPollingRef.current = null
+            }
+            const syncResult = await syncSupabase(week, 8)
+            const isBackground = (syncResult as { _accepted?: boolean })._accepted
             setLoadingProgress({
               step: 'sync',
               stepNumber: 0,
               totalSteps: 27,
-              message: 'Supabase sync OK – data saved.',
-              percentage: 2,
-              supabaseStatus: 'Supabase sync: OK'
+              message: isBackground
+                ? (syncResult.message || 'Sync started in background...')
+                : 'Supabase sync OK – data saved.',
+              percentage: isBackground ? 0 : 2,
+              supabaseStatus: isBackground ? 'Supabase sync: Running...' : 'Supabase sync: OK'
             })
-            console.log(`✅ Supabase sync completed for week ${week}`)
+            console.log(isBackground ? `✅ Supabase sync started for week ${week}` : `✅ Supabase sync completed for week ${week}`)
+
+            if (isBackground && hasBackend) {
+              const SYNC_POLL_MS = 2000
+              const SYNC_TIMEOUT_MS = 5 * 60 * 1000
+              const startedAt = Date.now()
+              syncPollingRef.current = setInterval(async () => {
+                if (Date.now() - startedAt > SYNC_TIMEOUT_MS) {
+                  if (syncPollingRef.current) {
+                    clearInterval(syncPollingRef.current)
+                    syncPollingRef.current = null
+                  }
+                  setLoadingProgress(prev => prev ? {
+                    ...prev,
+                    message: 'Sync may have been interrupted. Try again or refresh in a minute.',
+                    percentage: Math.min(prev.percentage, 15),
+                    supabaseStatus: 'Supabase sync: Timeout'
+                  } : null)
+                  return
+                }
+                try {
+                  const status = await getSyncStatus(week)
+                  const pct = Math.min(15, (status.progress / 100) * 15)
+                  setLoadingProgress(prev => prev ? {
+                    ...prev,
+                    message: status.message || prev.message,
+                    percentage: pct,
+                    supabaseStatus: `Supabase sync: ${status.status === 'running' ? `${status.progress}%` : status.status}`
+                  } : null)
+                  if (status.status === 'done') {
+                    if (syncPollingRef.current) {
+                      clearInterval(syncPollingRef.current)
+                      syncPollingRef.current = null
+                    }
+                    setLoadingProgress(prev => prev ? {
+                      ...prev,
+                      message: 'Sync complete – loading data...',
+                      percentage: 15,
+                      supabaseStatus: 'Supabase sync: OK'
+                    } : null)
+                    try {
+                      localStorage.removeItem(getCacheKey(week))
+                      await loadAllData(week, false)
+                    } catch (e) {
+                      console.warn('Reload after sync failed:', e)
+                    }
+                  } else if (status.status === 'failed') {
+                    if (syncPollingRef.current) {
+                      clearInterval(syncPollingRef.current)
+                      syncPollingRef.current = null
+                    }
+                    setLoadingProgress(prev => prev ? {
+                      ...prev,
+                      message: status.error || 'Sync failed',
+                      supabaseStatus: `Supabase sync: Failed – ${status.error || 'unknown'}`
+                    } : null)
+                  }
+                } catch (e) {
+                  console.warn('Sync status poll failed:', e)
+                }
+              }, SYNC_POLL_MS)
+            }
           } catch (syncErr: any) {
             const backendMessage = syncErr?.message || String(syncErr)
             setLoadingProgress({
@@ -1195,6 +1266,15 @@ export function DataCacheProvider({ children }: { children: ReactNode }) {
       }
     })()
   }, [baseWeek])
+
+  useEffect(() => {
+    return () => {
+      if (syncPollingRef.current) {
+        clearInterval(syncPollingRef.current)
+        syncPollingRef.current = null
+      }
+    }
+  }, [])
 
   const value: DataCacheContextType = {
     periods,

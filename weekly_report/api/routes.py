@@ -16,14 +16,16 @@ if _env_path_cwd.exists() and (
     load_dotenv(_env_path_cwd)  # fallback when root missing or started from another cwd
 # Supabase env check is logged at startup (after logger is imported)
 
-from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Response, Request
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Response, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 import json
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 import re
+import threading
 import tempfile
+from datetime import datetime, timezone
 import shutil
 from datetime import datetime
 from loguru import logger
@@ -3742,38 +3744,85 @@ async def supabase_verify_endpoint():
     return result
 
 
-@app.post("/api/sync-supabase")
-async def sync_supabase_endpoint(
-    week: str = Query(..., description="ISO week format: YYYY-WW"),
-    num_weeks: int = Query(8, description="Number of weeks to analyze")
-):
-    """Trigger Supabase sync for the specified week."""
+# In-memory sync status for background sync progress (keyed by week)
+_sync_status: Dict[str, Dict[str, Any]] = {}
+_sync_status_lock = threading.Lock()
+
+def _set_sync_status(week: str, status: str, progress: int = 0, message: str = "", error: Optional[str] = None) -> None:
+    with _sync_status_lock:
+        _sync_status[week] = {
+            "status": status,
+            "progress": progress,
+            "message": message,
+            "error": error,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+def _get_sync_status(week: str) -> Dict[str, Any]:
+    with _sync_status_lock:
+        data = _sync_status.get(week)
+    if data:
+        return dict(data)
+    return {"status": "idle", "progress": 0, "message": "", "error": None, "updated_at": None}
+
+
+@app.get("/api/sync-status")
+async def get_sync_status(week: str = Query(..., description="ISO week format: YYYY-WW")):
+    """Return current sync status for the given week (for polling during background sync)."""
     try:
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        
-        from weekly_report.src.sync.supabase_sync import sync_supabase_data
-        
-        result = sync_supabase_data(week, num_weeks=num_weeks)
-        
-        if not result.get("success"):
-            raise HTTPException(
-                status_code=500,
-                detail=result.get("error", "Sync failed")
-            )
-        
-        return {
-            "success": True,
-            "week": week,
-            "row_counts": result.get("row_counts", {}),
-            "elapsed_seconds": result.get("elapsed_seconds", 0),
-            "sync_id": result.get("sync_id")
-        }
-        
+        return _get_sync_status(week)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Supabase sync failed: {e}")
+        logger.error(f"Sync status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sync-supabase")
+async def sync_supabase_endpoint(
+    background_tasks: BackgroundTasks,
+    week: str = Query(..., description="ISO week format: YYYY-WW"),
+    num_weeks: int = Query(8, description="Number of weeks to analyze")
+):
+    """Start Supabase sync in the background and return immediately to avoid request timeout."""
+    try:
+        if not validate_iso_week(week):
+            raise HTTPException(status_code=400, detail="Invalid ISO week format")
+
+        from weekly_report.src.sync.supabase_sync import sync_supabase_data
+
+        def run_sync():
+            _set_sync_status(week, "running", 0, "Starting...")
+            try:
+                def on_progress(progress: int, message: str) -> None:
+                    _set_sync_status(week, "running", progress, message)
+
+                result = sync_supabase_data(week, num_weeks=num_weeks, progress_callback=on_progress)
+                if result.get("success"):
+                    _set_sync_status(week, "done", 100, "Sync complete")
+                else:
+                    _set_sync_status(week, "failed", 0, "", error=result.get("error", "Unknown error"))
+            except Exception as e:
+                logger.error(f"Background Supabase sync failed: {e}")
+                _set_sync_status(week, "failed", 0, "", error=str(e))
+
+        background_tasks.add_task(run_sync)
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "success": True,
+                "week": week,
+                "message": "Sync started in background. Refresh the page in 1–2 minutes to see updated data.",
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Supabase sync start failed: {e}")
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 

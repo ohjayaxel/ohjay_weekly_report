@@ -25,15 +25,32 @@ export default function Settings() {
   const [loadingDimensions, setLoadingDimensions] = useState(false)
   const [metadataLoading, setMetadataLoading] = useState(true)
   const metadataTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const [supabaseVerifyLoading, setSupabaseVerifyLoading] = useState(false)
-  const [supabaseVerifyResult, setSupabaseVerifyResult] = useState<any>(null) // Track if PDF has been downloaded to prevent duplicate downloads
   const [weeksWithData, setWeeksWithData] = useState<Set<string> | null>(null)
-  const supabaseDisabled = process.env.NEXT_PUBLIC_DISABLE_SUPABASE === 'true'
+  const [weeksWithFiles, setWeeksWithFiles] = useState<string[]>([])
+  const [weeksAvailable, setWeeksAvailable] = useState<string[]>([])
+  const [weekAliases, setWeekAliases] = useState<Record<string, string>>({})
+  const [copyFrom, setCopyFrom] = useState('')
+  const [copyTo, setCopyTo] = useState('')
+  const [aliasActionLoading, setAliasActionLoading] = useState(false)
+  const [aliasActionMessage, setAliasActionMessage] = useState<string | null>(null)
 
   useEffect(() => {
     import('@/lib/supabase-queries')
       .then((m) => m.getWeeksWithDataFromSupabase())
       .then((weeks) => setWeeksWithData(new Set(weeks)))
+  }, [])
+
+  useEffect(() => {
+    if (!hasBackend) return
+    Promise.all([
+      import('@/lib/api').then((m) => m.getWeeksWithFiles()),
+      import('@/lib/api').then((m) => m.getWeeksAvailable()),
+      import('@/lib/api').then((m) => m.getWeekAliases()),
+    ]).then(([wf, wa, al]) => {
+      setWeeksWithFiles(wf.weeks || [])
+      setWeeksAvailable(wa.weeks || [])
+      setWeekAliases(al.aliases || {})
+    }).catch(() => {})
   }, [])
 
   // Sync selectedWeek with baseWeek from context
@@ -273,108 +290,102 @@ export default function Settings() {
           <Separator />
 
           <div>
-            <h3 className="text-sm font-medium mb-3">Supabase connection (backend)</h3>
-            {supabaseDisabled ? (
-              <p className="text-xs text-gray-500">
-                Supabase är avstängt via <code>NEXT_PUBLIC_DISABLE_SUPABASE</code>. Ingen verifiering behövs.
-              </p>
-            ) : (
-              <>
-                <p className="text-xs text-gray-500 mb-2">
-                  Verifierar att backend ser .env och kan ansluta till Supabase. Inga gissningar – varje steg visas exakt.
-                </p>
-                <Button
-                  onClick={async () => {
-                    setSupabaseVerifyLoading(true)
-                    setSupabaseVerifyResult(null)
-                    try {
-                      const { verifySupabase } = await import('@/lib/api')
-                      const r = await verifySupabase()
-                      setSupabaseVerifyResult(r)
-                    } catch (e: any) {
-                      setSupabaseVerifyResult({
-                        error: e?.message || String(e),
-                        env_file_loaded: false,
-                        SUPABASE_URL: 'not_set',
-                        SUPABASE_SERVICE_ROLE_KEY: 'not_set',
-                        key_length: 0,
-                        client_created: false,
-                        client_error: null,
-                        query_ok: false,
-                        query_error: null,
-                        table_row_count: null
-                      })
-                    } finally {
-                      setSupabaseVerifyLoading(false)
-                    }
-                  }}
-                  variant="outline"
-                  size="sm"
-                  disabled={supabaseVerifyLoading}
+            <h3 className="text-sm font-medium mb-3">Use another week&apos;s data</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              Use data files from one week for another week (no file copy – reports for the target week will use the source week&apos;s files).
+            </p>
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="copy-from" className="text-xs font-medium text-gray-600">Copy data from</label>
+                <select
+                  id="copy-from"
+                  value={copyFrom}
+                  onChange={(e) => setCopyFrom(e.target.value)}
+                  className="min-w-[140px] px-3 py-2 border border-gray-300 rounded-md bg-white text-sm"
                 >
-                  {supabaseVerifyLoading ? 'Verifierar...' : 'Verifiera Supabase (backend)'}
-                </Button>
-                {supabaseVerifyResult && (
-                  <div className="mt-3 p-3 rounded border bg-gray-50 text-xs font-mono space-y-1">
-                    {'error' in supabaseVerifyResult ? (
-                      <div className="text-red-600">{supabaseVerifyResult.error}</div>
-                    ) : (
-                      <>
-                        <div>env_file_loaded: {String(supabaseVerifyResult.env_file_loaded)}</div>
-                        <div>SUPABASE_URL: {supabaseVerifyResult.SUPABASE_URL}</div>
-                        <div>
-                          SUPABASE_SERVICE_ROLE_KEY: {supabaseVerifyResult.SUPABASE_SERVICE_ROLE_KEY} (length:{' '}
-                          {supabaseVerifyResult.key_length})
-                        </div>
-                        <div>client_created: {String(supabaseVerifyResult.client_created)}</div>
-                        {supabaseVerifyResult.client_error && (
-                          <div className="text-amber-700">client_error: {supabaseVerifyResult.client_error}</div>
-                        )}
-                        <div>query_ok: {String(supabaseVerifyResult.query_ok)}</div>
-                        {supabaseVerifyResult.query_error && (
-                          <div className="text-amber-700">query_error: {supabaseVerifyResult.query_error}</div>
-                        )}
-                        {supabaseVerifyResult.table_row_count != null && (
-                          <div>table_row_count: {supabaseVerifyResult.table_row_count}</div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          <Separator />
-
-          <div>
-            <h3 className="text-sm font-medium mb-3">Data Management</h3>
-            <div className="flex items-center gap-4">
+                  <option value="">Select week</option>
+                  {weeksWithFiles.map((w) => (
+                    <option key={w} value={w}>{w}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="copy-to" className="text-xs font-medium text-gray-600">Copy to</label>
+                <select
+                  id="copy-to"
+                  value={copyTo}
+                  onChange={(e) => setCopyTo(e.target.value)}
+                  className="min-w-[140px] px-3 py-2 border border-gray-300 rounded-md bg-white text-sm"
+                >
+                  <option value="">Select week</option>
+                  {weeksAvailable.map((w) => (
+                    <option key={w} value={w}>{w}</option>
+                  ))}
+                </select>
+              </div>
               <Button
                 onClick={async () => {
-                  await loadMetadata(true)
+                  if (!copyFrom || !copyTo) return
+                  setAliasActionMessage(null)
+                  setAliasActionLoading(true)
+                  try {
+                    const { setWeekAlias } = await import('@/lib/api')
+                    await setWeekAlias(copyTo, copyFrom)
+                    setWeekAliases((prev) => ({ ...prev, [copyTo]: copyFrom }))
+                    setAliasActionMessage(`Week ${copyTo} will use data from ${copyFrom}.`)
+                    setCopyTo('')
+                    setCopyFrom('')
+                    await import('@/lib/supabase-queries').then((m) => m.getWeeksWithDataFromSupabase()).then((weeks) => setWeeksWithData(new Set(weeks)))
+                  } catch (e: any) {
+                    setAliasActionMessage(e?.message || 'Failed to set alias')
+                  } finally {
+                    setAliasActionLoading(false)
+                  }
                 }}
-                variant="ghost"
-                className="flex items-center gap-2"
+                disabled={!copyFrom || !copyTo || aliasActionLoading}
               >
-                <RefreshCw className="h-4 w-4" />
-                Reload Metadata
-              </Button>
-              <Button
-                onClick={async () => {
-                  await loadDimensions(true)
-                }}
-                variant="ghost"
-                className="flex items-center gap-2"
-                disabled={loadingDimensions}
-              >
-                <RefreshCw className={`h-4 w-4 ${loadingDimensions ? 'animate-spin' : ''}`} />
-                {loadingDimensions ? 'Loading Dimensions...' : 'Check Dimensions'}
+                {aliasActionLoading ? 'Applying...' : 'Apply'}
               </Button>
             </div>
-            <p className="text-xs text-gray-500 mt-2">
-              Reload file metadata to check current file status. Use "Check Dimensions" to validate file structure. Data refresh happens automatically after file upload.
-            </p>
+            {aliasActionMessage && (
+              <p className={`mt-2 text-sm ${aliasActionMessage.startsWith('Week') ? 'text-green-700' : 'text-red-600'}`}>
+                {aliasActionMessage}
+              </p>
+            )}
+            {Object.keys(weekAliases).length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-medium text-gray-600 mb-1">Current aliases (report week → data from)</p>
+                <ul className="text-xs text-gray-600 space-y-1">
+                  {Object.entries(weekAliases).map(([target, source]) => (
+                    <li key={target} className="flex items-center gap-2">
+                      <span>{target} → {source}</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-xs"
+                        onClick={async () => {
+                          setAliasActionMessage(null)
+                          try {
+                            const { deleteWeekAlias } = await import('@/lib/api')
+                            await deleteWeekAlias(target)
+                            setWeekAliases((prev) => {
+                              const next = { ...prev }
+                              delete next[target]
+                              return next
+                            })
+                            setAliasActionMessage(`Alias removed for ${target}.`)
+                          } catch (e: any) {
+                            setAliasActionMessage(e?.message || 'Failed to remove alias')
+                          }
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           <Separator />

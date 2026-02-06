@@ -773,6 +773,52 @@ export async function getActualsMarketsDetailed(week: string): Promise<Record<st
   return response.json()
 }
 
+/** Weeks that have uploaded files (for "Copy data from" dropdown). */
+export async function getWeeksWithFiles(): Promise<{ weeks: string[] }> {
+  if (!hasBackend) return { weeks: [] }
+  const response = await fetch(`${API_BASE_URL}/api/weeks-with-files`)
+  if (!response.ok) throw new Error('Failed to fetch weeks with files')
+  return response.json()
+}
+
+/** Weeks available for "Copy to" dropdown. */
+export async function getWeeksAvailable(count = 104): Promise<{ weeks: string[] }> {
+  if (!hasBackend) return { weeks: [] }
+  const response = await fetch(`${API_BASE_URL}/api/weeks-available?count=${count}`)
+  if (!response.ok) throw new Error('Failed to fetch weeks available')
+  return response.json()
+}
+
+/** Current week data aliases (target_week -> source_week). */
+export async function getWeekAliases(): Promise<{ aliases: Record<string, string> }> {
+  if (!hasBackend) return { aliases: {} }
+  const response = await fetch(`${API_BASE_URL}/api/week-aliases`)
+  if (!response.ok) throw new Error('Failed to fetch week aliases')
+  return response.json()
+}
+
+/** Set "use source_week data for target_week" (no file copy). */
+export async function setWeekAlias(targetWeek: string, sourceWeek: string): Promise<{ success: boolean }> {
+  if (!hasBackend) throw new Error('Backend not configured')
+  const response = await fetch(`${API_BASE_URL}/api/week-aliases`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_week: targetWeek, source_week: sourceWeek }),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data?.detail || data?.error || 'Failed to set week alias')
+  return data
+}
+
+/** Remove alias for target week. */
+export async function deleteWeekAlias(targetWeek: string): Promise<{ success: boolean }> {
+  if (!hasBackend) throw new Error('Backend not configured')
+  const response = await fetch(`${API_BASE_URL}/api/week-aliases/${encodeURIComponent(targetWeek)}`, { method: 'DELETE' })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data?.detail || data?.error || 'Failed to delete week alias')
+  return data
+}
+
 /** Verify Supabase connection (env, client, query). Returns exact status for each step – no guesswork. */
 export async function verifySupabase(): Promise<{
   env_file_loaded: boolean

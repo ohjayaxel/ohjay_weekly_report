@@ -59,8 +59,15 @@ from weekly_report.src.pdf.table1_builder import build_table1_pdf
 # Note: weekly_reports_builder not available, using Puppeteer-based approach instead
 # from weekly_report.src.pdf.weekly_reports_builder import build_weekly_reports_pdf
 from weekly_report.src.cache.manager import metrics_cache, raw_data_cache
-from weekly_report.src.config import load_config
+from weekly_report.src.config import load_config, Config
 from weekly_report.src.utils.file_metadata import extract_file_metadata
+from weekly_report.src.utils.week_alias import resolve_data_week
+
+
+def get_data_config(base_week: str) -> Config:
+    """Config for reading raw data for base_week; uses aliased week when 'copy data from' is set."""
+    data_week = resolve_data_week(base_week)
+    return load_config(week=data_week)
 
 
 # Pydantic models
@@ -377,8 +384,8 @@ def get_metrics_from_supabase(base_week: str, metric_key: str = None):
             cached_result = supabase.table("weekly_report_metrics").select("*").eq("base_week", base_week).limit(1).execute()
             if cached_result.data and len(cached_result.data) > 0:
                 cached_row = cached_result.data[0]
-                config = load_config(week=base_week)
-                current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                config = get_data_config(base_week)
+                current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
                 
                 stored_hashes = cached_row.get("file_hashes")
                 if stored_hashes and isinstance(stored_hashes, str):
@@ -635,8 +642,8 @@ async def get_table1_metrics(
                     cached_result = supabase.table("weekly_report_metrics").select("*").eq("base_week", base_week).limit(1).execute()
                     if cached_result.data and len(cached_result.data) > 0:
                         cached_row = cached_result.data[0]
-                        config = load_config(week=base_week)
-                        current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                        config = get_data_config(base_week)
+                        current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
                         
                         stored_hashes = cached_row.get("file_hashes")
                         if stored_hashes and isinstance(stored_hashes, str):
@@ -673,7 +680,7 @@ async def get_table1_metrics(
         filtered_periods = {k: v for k, v in all_periods.items() if k in requested_periods}
         
         # Load config to get data root
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         
         # Calculate metrics
         if include_ytd:
@@ -709,7 +716,7 @@ async def generate_pdf(request: GeneratePDFRequest):
         filtered_periods = {k: v for k, v in all_periods.items() if k in request.periods}
         
         # Load config
-        config = load_config(week=request.base_week)
+        config = get_data_config(request.base_week)
         
         # Calculate metrics
         metrics_results = calculate_table1_for_periods(filtered_periods, Path(config.data_root))
@@ -815,7 +822,7 @@ async def generate_weekly_reports_pdf(request: GeneratePDFRequest):
                 yield f"data: {json.dumps({'error': f'Invalid ISO week format: {request.base_week}'})}\n\n"
                 return
 
-            config = load_config(week=request.base_week)
+            config = get_data_config(request.base_week)
             frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
             logger.info(f"Starting PDF generation using Puppeteer for {request.base_week}")
@@ -1507,6 +1514,129 @@ async def health_check():
     }
 
 
+def _list_weeks_with_uploaded_files() -> List[str]:
+    """Return sorted list of ISO week strings that have at least one uploaded data file."""
+    config = load_config()
+    raw_root = config.data_root / "raw"
+    if not raw_root.exists():
+        return []
+    weeks = []
+    for path in raw_root.iterdir():
+        if not path.is_dir():
+            continue
+        name = path.name
+        if not validate_iso_week(name):
+            continue
+        # At least one of qlik, dema_spend, dema_gm2, shopify has a file
+        for sub in ["qlik", "dema_spend", "dema_gm2", "shopify"]:
+            sub_path = path / sub
+            if sub_path.exists():
+                if any(f.suffix.lower() in (".csv", ".xlsx") for f in sub_path.iterdir() if not f.name.startswith(".")):
+                    weeks.append(name)
+                    break
+    return sorted(weeks, reverse=True)
+
+
+def _list_weeks_available(count: int = 104) -> List[str]:
+    """Return list of ISO week strings (past weeks, most recent first) for 'copy to' dropdown."""
+    from datetime import timedelta
+    today = datetime.utcnow().date()
+    weeks = []
+    for i in range(count):
+        d = today - timedelta(weeks=i)
+        y, w, _ = d.isocalendar()
+        week_str = f"{y}-{w:02d}"
+        if week_str not in weeks:
+            weeks.append(week_str)
+    return weeks
+
+
+@app.get("/api/weeks-with-files")
+async def api_weeks_with_files():
+    """List weeks that have at least one uploaded data file (for 'Copy data from' dropdown)."""
+    try:
+        weeks = _list_weeks_with_uploaded_files()
+        return {"weeks": weeks}
+    except Exception as e:
+        logger.error(f"Error listing weeks with files: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list weeks with files")
+
+
+@app.get("/api/weeks-available")
+async def api_weeks_available(count: int = Query(104, ge=1, le=208)):
+    """List weeks available for 'Copy to' dropdown (past weeks, most recent first)."""
+    try:
+        weeks = _list_weeks_available(count=count)
+        return {"weeks": weeks}
+    except Exception as e:
+        logger.error(f"Error listing weeks available: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list weeks")
+
+
+def _get_week_aliases() -> Dict[str, str]:
+    """Return dict target_week -> source_week from Supabase."""
+    from weekly_report.src.utils.week_alias import get_week_aliases
+    return get_week_aliases()
+
+
+@app.get("/api/week-aliases")
+async def api_get_week_aliases():
+    """Get current week data aliases (target_week -> source_week)."""
+    try:
+        aliases = _get_week_aliases()
+        return {"aliases": aliases}
+    except Exception as e:
+        logger.error(f"Error getting week aliases: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get week aliases")
+
+
+class WeekAliasBody(BaseModel):
+    target_week: str
+    source_week: str
+
+
+@app.post("/api/week-aliases")
+async def api_set_week_alias(body: WeekAliasBody):
+    """Set 'use source_week data for target_week' (no file copy)."""
+    if not validate_iso_week(body.target_week) or not validate_iso_week(body.source_week):
+        raise HTTPException(status_code=400, detail="Invalid ISO week format (use YYYY-WW)")
+    try:
+        from weekly_report.src.adapters.supabase_client import get_supabase_client
+        supabase = get_supabase_client()
+        if not supabase:
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+        now = datetime.utcnow().isoformat() + "Z"
+        supabase.table("week_data_aliases").upsert(
+            {"target_week": body.target_week, "source_week": body.source_week, "updated_at": now},
+            on_conflict="target_week"
+        ).execute()
+        return {"success": True, "target_week": body.target_week, "source_week": body.source_week}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error setting week alias: {e}")
+        raise HTTPException(status_code=500, detail="Failed to set week alias")
+
+
+@app.delete("/api/week-aliases/{target_week}")
+async def api_delete_week_alias(target_week: str):
+    """Remove alias for target_week (target will use its own data again)."""
+    if not validate_iso_week(target_week):
+        raise HTTPException(status_code=400, detail="Invalid ISO week format")
+    try:
+        from weekly_report.src.adapters.supabase_client import get_supabase_client
+        supabase = get_supabase_client()
+        if not supabase:
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+        supabase.table("week_data_aliases").delete().eq("target_week", target_week).execute()
+        return {"success": True, "message": f"Alias removed for {target_week}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting week alias: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete week alias")
+
+
 @app.get("/api/debug/markets")
 async def debug_markets(
     base_week: str = Query(..., description="Base ISO week like '2025-42'"),
@@ -1514,7 +1644,7 @@ async def debug_markets(
 ):
     """Debug endpoint to see raw markets data."""
     
-    config = load_config(week=base_week)
+    config = get_data_config(base_week)
     markets_data = calculate_top_markets_for_weeks(base_week, num_weeks, config.data_root)
     
     # Return raw data without Pydantic
@@ -1546,7 +1676,7 @@ async def get_top_markets(
                 return response
         
         # Calculate top markets (fresh or fallback)
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         markets_data = calculate_top_markets_for_weeks(base_week, num_weeks, config.data_root)
         
         # Debug: Log raw data
@@ -1592,7 +1722,7 @@ async def get_online_kpis(
             return response
         
         # Fallback: Calculate Online KPIs
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         kpis_data = calculate_online_kpis_for_weeks(base_week, num_weeks, config.data_root)
         
         response = OnlineKPIsResponse(**kpis_data)
@@ -1622,7 +1752,7 @@ async def get_contribution(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         contribution_data = calculate_contribution_for_weeks(base_week, num_weeks, config.data_root)
         
         response = ContributionResponse(**contribution_data)
@@ -1652,7 +1782,7 @@ async def get_gender_sales(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         gender_sales_data = calculate_gender_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -1689,7 +1819,7 @@ async def get_men_category_sales(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         men_category_sales_data = calculate_men_category_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -1726,7 +1856,7 @@ async def get_women_category_sales(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         women_category_sales_data = calculate_women_category_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -1763,7 +1893,7 @@ async def get_category_sales(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         category_sales_data = calculate_category_sales_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -1815,7 +1945,7 @@ async def get_top_products(
         if customer_type not in ['new', 'returning']:
             raise HTTPException(status_code=400, detail=f"Customer type must be 'new' or 'returning'")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         top_products_data = calculate_top_products_for_weeks(base_week, num_weeks, config.data_root, top_n, customer_type)
         
         # Format response
@@ -1860,7 +1990,7 @@ async def get_top_products_by_gender(
         if gender_filter not in ['men', 'women']:
             raise HTTPException(status_code=400, detail=f"Gender filter must be 'men' or 'women'")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         top_products_data = calculate_top_products_by_gender_for_weeks(base_week, num_weeks, config.data_root, gender_filter, top_n)
         
         # Format response
@@ -1897,7 +2027,7 @@ async def get_sessions_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         sessions_data = calculate_sessions_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -1934,7 +2064,7 @@ async def get_conversion_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         conversion_data = calculate_conversion_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -1971,7 +2101,7 @@ async def get_new_customers_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         new_customers_data = calculate_new_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2008,7 +2138,7 @@ async def get_returning_customers_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         returning_customers_data = calculate_returning_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2045,7 +2175,7 @@ async def get_aov_new_customers_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         aov_data = calculate_aov_new_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2082,7 +2212,7 @@ async def get_aov_returning_customers_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         aov_data = calculate_aov_returning_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2119,7 +2249,7 @@ async def get_marketing_spend_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         spend_data = calculate_marketing_spend_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2156,7 +2286,7 @@ async def get_ncac_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         ncac_data = calculate_ncac_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2193,7 +2323,7 @@ async def get_contribution_new_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         contribution_data = calculate_contribution_new_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2230,7 +2360,7 @@ async def get_contribution_new_total_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         contribution_data = calculate_contribution_new_total_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2267,7 +2397,7 @@ async def get_contribution_returning_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         contribution_data = calculate_contribution_returning_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2304,7 +2434,7 @@ async def get_contribution_returning_total_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         contribution_data = calculate_contribution_returning_total_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2341,7 +2471,7 @@ async def get_total_contribution_per_country(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         contribution_data = calculate_total_contribution_per_country_for_weeks(base_week, num_weeks, config.data_root)
         
         # Format response
@@ -2395,8 +2525,8 @@ async def get_batch_all_metrics(
                         # Check if num_weeks matches (if different, need to recompute)
                         if cached_num_weeks == num_weeks:
                             # Check file hashes
-                            config = load_config(week=base_week)
-                            current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                            config = get_data_config(base_week)
+                            current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
                             
                             stored_hashes = cached_row.get("file_hashes")
                             if stored_hashes and isinstance(stored_hashes, str):
@@ -2420,7 +2550,7 @@ async def get_batch_all_metrics(
             logger.debug("Supabase client not available, skipping cache check")
         
         # Fallback: Compute metrics
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         logger.info(f"Computing batch metrics for {base_week} with {num_weeks} weeks")
         all_metrics = calculate_all_metrics(base_week, config.data_root, num_weeks)
         
@@ -2432,7 +2562,7 @@ async def get_batch_all_metrics(
                 try:
                     from weekly_report.src.export.weekly_reports import map_batch_metrics_to_supabase
                     from weekly_report.src.utils.file_hashes import get_file_hashes_for_week
-                    current_file_hashes = get_file_hashes_for_week(base_week, config.data_root)
+                    current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
                     weekly_metrics_row = map_batch_metrics_to_supabase(
                         base_week=base_week,
                         metrics=all_metrics,
@@ -2573,7 +2703,7 @@ async def upload_file(
         if file_type in ["dema_spend", "dema_gm2", "shopify", "budget"] and file_extension != '.csv':
             raise HTTPException(status_code=400, detail=f"{file_type} file must be .csv")
         
-        # Create target directory
+        # Create target directory (always use requested week for uploads, not alias)
         config = load_config(week=week)
         target_dir = config.raw_data_path / file_type
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -2783,7 +2913,7 @@ async def get_file_dimensions(week: str = Query(...)):
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
         
-        config = load_config(week=week)
+        config = get_data_config(week)
         raw_path = config.raw_data_path
         
         # Check cache first
@@ -2886,7 +3016,7 @@ async def get_file_metadata(week: str = Query(...)):
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
         
-        config = load_config(week=week)
+        config = get_data_config(week)
         raw_path = config.raw_data_path
         
         metadata = {}
@@ -2937,7 +3067,7 @@ async def get_budget_data(week: str = Query(...)):
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
         
-        config = load_config(week=week)
+        config = get_data_config(week)
         # Note: load_data will check Supabase first, then fallback to local files
         from weekly_report.src.adapters.budget import load_data
         budget_df = load_data(config.raw_data_path, base_week=week)
@@ -2986,7 +3116,7 @@ async def get_discounts_sales_yoy(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discount_sales_yoy_for_weeks
         return calculate_discount_sales_yoy_for_weeks(base_week, num_weeks, config.data_root, segment, expanded)
     except HTTPException:
@@ -3005,7 +3135,7 @@ async def get_discounts_monthly_metrics(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discounts_monthly_metrics
         return calculate_discounts_monthly_metrics(base_week, config.data_root, months, segment)
     except HTTPException:
@@ -3023,7 +3153,7 @@ async def get_discounts_summary(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discounts_summary_metrics
         return calculate_discounts_summary_metrics(base_week, config.data_root, include_ytd)
     except HTTPException:
@@ -3040,7 +3170,7 @@ async def get_discounts_ltm(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discounts_ltm_metrics
         return calculate_discounts_ltm_metrics(base_week, config.data_root)
     except HTTPException:
@@ -3061,7 +3191,7 @@ async def get_discounts_products(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import (
             calculate_discount_category_price_sales_for_weeks,
             calculate_discount_category_price_sales_for_months,
@@ -3089,7 +3219,7 @@ async def get_discounts_categories(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discount_category_breakdown
         return calculate_discount_category_breakdown(base_week, iso_week, config.data_root, segment)
     except HTTPException:
@@ -3108,7 +3238,7 @@ async def get_discounts_categories_monthly(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discount_category_breakdown_month
         return calculate_discount_category_breakdown_month(base_week, month, config.data_root, segment)
     except HTTPException:
@@ -3128,7 +3258,7 @@ async def get_discounts_category_countries(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discount_category_country_breakdown
         return calculate_discount_category_country_breakdown(base_week, iso_week, category, config.data_root, segment)
     except HTTPException:
@@ -3148,7 +3278,7 @@ async def get_discounts_category_countries_monthly(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discount_category_country_breakdown_month
         return calculate_discount_category_country_breakdown_month(base_week, month, category, config.data_root, segment)
     except HTTPException:
@@ -3168,7 +3298,7 @@ async def get_discounts_category_series(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.discounts_sales import calculate_discount_category_series
         return calculate_discount_category_series(base_week, category, config.data_root, segment, expanded)
     except HTTPException:
@@ -3188,7 +3318,7 @@ async def get_customer_quality_scorecard(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.customer_discount_quality import (
             DiscountQualityConfig,
             build_quality_context,
@@ -3221,7 +3351,7 @@ async def get_customer_quality_discount_depth(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.customer_discount_quality import (
             build_quality_context,
             compute_discount_depth,
@@ -3252,7 +3382,7 @@ async def get_customer_quality_segments(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.customer_discount_quality import (
             build_quality_context,
             compute_segments,
@@ -3291,7 +3421,7 @@ async def get_customer_quality_pathways(
     try:
         if not validate_iso_week(base_week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=base_week)
+        config = get_data_config(base_week)
         from weekly_report.src.metrics.customer_discount_quality import (
             build_quality_context,
             compute_pathways,
@@ -3364,7 +3494,7 @@ async def get_budget_debug(
     try:
         if not validate_iso_week(week):
             raise HTTPException(status_code=400, detail="Invalid ISO week format")
-        config = load_config(week=week)
+        config = get_data_config(week)
         from weekly_report.src.adapters.budget import load_data
         df = load_data(config.raw_data_path, base_week=week)
         df.columns = df.columns.str.strip()

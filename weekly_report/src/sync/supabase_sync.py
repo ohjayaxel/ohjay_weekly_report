@@ -10,6 +10,7 @@ from loguru import logger
 
 from weekly_report.src.adapters.supabase_client import get_supabase_client
 from weekly_report.src.config import load_config
+from weekly_report.src.utils.week_alias import resolve_data_week
 from weekly_report.src.export.budget_general import map_budget_general_to_rows
 from weekly_report.src.export.budget_markets import map_budget_markets_to_rows
 from weekly_report.src.export.weekly_reports import map_batch_metrics_to_supabase
@@ -35,11 +36,12 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
     """
     start_time = time.time()
     
-    # Load configuration
-    config = load_config(week=base_week)
-    week = config.week
+    # Use aliased week for reading data; store in Supabase under base_week (requested week)
+    data_week = resolve_data_week(base_week or "")
+    config = load_config(week=data_week)
+    week = base_week or config.week  # store under requested week so frontend finds it
     
-    logger.info(f"Starting Supabase sync for week {week}")
+    logger.info(f"Starting Supabase sync for week {week} (data from {data_week})")
     
     # Initialize Supabase client
     supabase = get_supabase_client()
@@ -68,9 +70,9 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         # Step 0: Check cache and compute Weekly Report Metrics
         logger.info("Computing Weekly Report Metrics...")
         
-        # Calculate current file hashes
-        current_file_hashes = get_file_hashes_for_week(week, config.data_root)
-        logger.info(f"File hashes for week {week}: {list(current_file_hashes.keys())}")
+        # Calculate current file hashes (from data_week folder)
+        current_file_hashes = get_file_hashes_for_week(config.week, config.data_root)
+        logger.info(f"File hashes for data week {config.week}: {list(current_file_hashes.keys())}")
         
         # Check if cached metrics exist and file hashes match
         cached_metrics = None
@@ -123,8 +125,8 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
         # Compute metrics if not cached or hashes don't match
         if not cached_metrics:
             try:
-                logger.info(f"Computing all weekly report metrics for {week}...")
-                all_metrics = calculate_all_metrics(week, config.data_root, num_weeks)
+                logger.info(f"Computing all weekly report metrics for {week} (from data week {config.week})...")
+                all_metrics = calculate_all_metrics(config.week, config.data_root, num_weeks)
                 
                 # Map to Supabase format
                 weekly_metrics_row = map_batch_metrics_to_supabase(
@@ -172,14 +174,14 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 # Don't continue with budget sync if weekly report metrics fail - this is critical
                 raise  # Re-raise to fail the entire sync
         
-        # Step 1: Compute and sync Budget General
+        # Step 1: Compute and sync Budget General (read from data_week, store under requested week)
         logger.info("Computing Budget General...")
-        budget_data = compute_budget_general(week)
-        
-        if "error" in budget_data:
-            logger.warning(f"Budget General error (skipping sync): {budget_data['error']}")
-            # Continue with other steps even if budget fails
+        budget_data = compute_budget_general(config.week)
+        if not budget_data or "error" in budget_data:
+            if budget_data and "error" in budget_data:
+                logger.warning(f"Budget General error (skipping sync): {budget_data['error']}")
         else:
+            budget_data["week"] = week  # store under requested week
             budget_rows, budget_totals = map_budget_general_to_rows(budget_data, kind="budget")
             if budget_rows:
                 # Batch upsert (1000 rows at a time)
@@ -195,13 +197,14 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 row_counts["budget_general_totals"] = len(budget_totals)
                 logger.info(f"Upserted {len(budget_totals)} budget general totals")
         
-        # Step 2: Compute and sync Actuals General
+        # Step 2: Compute and sync Actuals General (read from data_week, store under requested week)
         logger.info("Computing Actuals General...")
-        actuals_data = compute_actuals_general(week)
-        
-        if "error" in actuals_data:
-            logger.warning(f"Actuals General error: {actuals_data['error']}")
+        actuals_data = compute_actuals_general(config.week)
+        if not actuals_data or "error" in actuals_data:
+            if actuals_data and "error" in actuals_data:
+                logger.warning(f"Actuals General error: {actuals_data['error']}")
         else:
+            actuals_data["week"] = week
             actuals_rows, actuals_totals = map_budget_general_to_rows(actuals_data, kind="actuals")
             if actuals_rows:
                 batch_size = 1000
@@ -216,11 +219,12 @@ def sync_supabase_data(base_week: Optional[str] = None, num_weeks: int = 8) -> D
                 row_counts["budget_general_totals_actuals"] = len(actuals_totals)
                 logger.info(f"Upserted {len(actuals_totals)} actuals general totals")
         
-        # Step 3: Compute and sync Actuals Markets Detailed
+        # Step 3: Compute and sync Actuals Markets Detailed (read from data_week, store under requested week)
         logger.info("Computing Actuals Markets Detailed...")
-        markets_data = compute_actuals_markets_detailed(week)
-        
-        if "error" in markets_data or not markets_data.get("markets"):
+        markets_data = compute_actuals_markets_detailed(config.week)
+        if markets_data and "error" not in markets_data and markets_data.get("markets"):
+            markets_data["week"] = week
+        if "error" in (markets_data or {}) or not (markets_data or {}).get("markets"):
             logger.warning(f"Actuals Markets Detailed error or empty: {markets_data.get('error', 'No markets')}")
         else:
             markets_rows, markets_totals = map_budget_markets_to_rows(markets_data, kind="actuals")

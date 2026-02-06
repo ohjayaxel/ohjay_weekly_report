@@ -109,6 +109,25 @@ CREATE TABLE IF NOT EXISTS budget_markets_totals (
 CREATE INDEX IF NOT EXISTS idx_budget_markets_totals_base_week ON budget_markets_totals(base_week);
 CREATE INDEX IF NOT EXISTS idx_budget_markets_totals_market ON budget_markets_totals(market);
 
+-- Table 6b: week_data_aliases
+-- Maps a "display" week to the week whose data files to use (no file duplication)
+-- e.g. target_week 2026-04, source_week 2026-05 => use 2026-05 files when generating reports for 2026-04
+CREATE TABLE IF NOT EXISTS week_data_aliases (
+    target_week TEXT PRIMARY KEY,
+    source_week TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_week_data_aliases_source_week ON week_data_aliases(source_week);
+
+ALTER TABLE week_data_aliases ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow anon read access" ON week_data_aliases;
+DROP POLICY IF EXISTS "Allow service role full access" ON week_data_aliases;
+CREATE POLICY "Allow anon read access" ON week_data_aliases FOR SELECT USING (true);
+CREATE POLICY "Allow service role full access" ON week_data_aliases FOR ALL USING (auth.role() = 'service_role');
+COMMENT ON TABLE week_data_aliases IS 'Maps target_week (report week) to source_week (week whose data files to use); avoids duplicating large files';
+
 -- Table 7: weeks
 -- Tracks which weeks have been processed
 CREATE TABLE IF NOT EXISTS weeks (

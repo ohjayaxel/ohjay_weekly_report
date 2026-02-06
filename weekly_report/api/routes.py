@@ -404,6 +404,17 @@ def get_metrics_from_supabase(base_week: str, metric_key: str = None):
                         else:
                             return False, None
                     return True, metrics_dict
+            # Alias fallback: if base_week uses another week's data and that week has Supabase cache, use it
+            source_week = resolve_data_week(base_week)
+            if source_week != base_week:
+                alt = supabase.table("weekly_report_metrics").select("*").eq("base_week", source_week).limit(1).execute()
+                if alt.data and len(alt.data) > 0:
+                    metrics_dict = reconstruct_metrics_from_supabase(alt.data[0])
+                    if metric_key:
+                        if metric_key in metrics_dict:
+                            return True, metrics_dict[metric_key]
+                        return False, None
+                    return True, metrics_dict
         except Exception as e:
             logger.debug(f"Error reading from Supabase cache: {e}")
     except ImportError:
@@ -1515,26 +1526,40 @@ async def health_check():
 
 
 def _list_weeks_with_uploaded_files() -> List[str]:
-    """Return sorted list of ISO week strings that have at least one uploaded data file."""
+    """Return sorted list of ISO week strings that have files on disk or data in Supabase (for 'Copy data from')."""
     config = load_config()
     raw_root = config.data_root / "raw"
-    if not raw_root.exists():
-        return []
-    weeks = []
-    for path in raw_root.iterdir():
-        if not path.is_dir():
-            continue
-        name = path.name
-        if not validate_iso_week(name):
-            continue
-        # At least one of qlik, dema_spend, dema_gm2, shopify has a file
-        for sub in ["qlik", "dema_spend", "dema_gm2", "shopify"]:
-            sub_path = path / sub
-            if sub_path.exists():
-                if any(f.suffix.lower() in (".csv", ".xlsx") for f in sub_path.iterdir() if not f.name.startswith(".")):
-                    weeks.append(name)
-                    break
-    return sorted(weeks, reverse=True)
+    weeks_set = set()
+    # From filesystem (local or persisted)
+    if raw_root.exists():
+        for path in raw_root.iterdir():
+            if not path.is_dir():
+                continue
+            name = path.name
+            if not validate_iso_week(name):
+                continue
+            for sub in ["qlik", "dema_spend", "dema_gm2", "shopify"]:
+                sub_path = path / sub
+                if sub_path.is_dir():
+                    try:
+                        if any(f.suffix.lower() in (".csv", ".xlsx") for f in sub_path.iterdir() if not f.name.startswith(".")):
+                            weeks_set.add(name)
+                            break
+                    except OSError:
+                        pass
+    # From Supabase (weeks that have been synced – so dropdown works on Railway where disk is ephemeral)
+    try:
+        from weekly_report.src.adapters.supabase_client import get_supabase_client
+        supabase = get_supabase_client()
+        if supabase:
+            r = supabase.table("weekly_report_metrics").select("base_week").execute()
+            for row in (r.data or []):
+                w = row.get("base_week")
+                if w and validate_iso_week(w):
+                    weeks_set.add(w)
+    except Exception as e:
+        logger.debug(f"Supabase weeks for copy-from: {e}")
+    return sorted(weeks_set, reverse=True)
 
 
 def _list_weeks_available(count: int = 104) -> List[str]:
@@ -1675,9 +1700,9 @@ async def get_top_markets(
                 response = MarketsResponse(**markets_data)
                 return response
         
-        # Calculate top markets (fresh or fallback)
+        # Calculate top markets (fresh or fallback; use data_week path for alias)
         config = get_data_config(base_week)
-        markets_data = calculate_top_markets_for_weeks(base_week, num_weeks, config.data_root)
+        markets_data = calculate_top_markets_for_weeks(config.week, num_weeks, config.data_root)
         
         # Debug: Log raw data
         logger.info(f"Raw data - First market weeks count: {len(markets_data['markets'][0]['weeks'])}")
@@ -1721,9 +1746,9 @@ async def get_online_kpis(
             response = OnlineKPIsResponse(**kpis_data)
             return response
         
-        # Fallback: Calculate Online KPIs
+        # Fallback: Calculate Online KPIs (use data_week path for alias)
         config = get_data_config(base_week)
-        kpis_data = calculate_online_kpis_for_weeks(base_week, num_weeks, config.data_root)
+        kpis_data = calculate_online_kpis_for_weeks(config.week, num_weeks, config.data_root)
         
         response = OnlineKPIsResponse(**kpis_data)
         
@@ -1753,7 +1778,7 @@ async def get_contribution(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        contribution_data = calculate_contribution_for_weeks(base_week, num_weeks, config.data_root)
+        contribution_data = calculate_contribution_for_weeks(config.week, num_weeks, config.data_root)
         
         response = ContributionResponse(**contribution_data)
         
@@ -1783,7 +1808,7 @@ async def get_gender_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        gender_sales_data = calculate_gender_sales_for_weeks(base_week, num_weeks, config.data_root)
+        gender_sales_data = calculate_gender_sales_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = GenderSalesResponse(
@@ -1820,7 +1845,7 @@ async def get_men_category_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        men_category_sales_data = calculate_men_category_sales_for_weeks(base_week, num_weeks, config.data_root)
+        men_category_sales_data = calculate_men_category_sales_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = MenCategorySalesResponse(
@@ -1857,7 +1882,7 @@ async def get_women_category_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        women_category_sales_data = calculate_women_category_sales_for_weeks(base_week, num_weeks, config.data_root)
+        women_category_sales_data = calculate_women_category_sales_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = WomenCategorySalesResponse(
@@ -1894,7 +1919,7 @@ async def get_category_sales(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        category_sales_data = calculate_category_sales_for_weeks(base_week, num_weeks, config.data_root)
+        category_sales_data = calculate_category_sales_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = CategorySalesResponse(
@@ -1946,7 +1971,7 @@ async def get_top_products(
             raise HTTPException(status_code=400, detail=f"Customer type must be 'new' or 'returning'")
         
         config = get_data_config(base_week)
-        top_products_data = calculate_top_products_for_weeks(base_week, num_weeks, config.data_root, top_n, customer_type)
+        top_products_data = calculate_top_products_for_weeks(config.week, num_weeks, config.data_root, top_n, customer_type)
         
         # Format response
         response = TopProductsResponse(
@@ -1991,7 +2016,7 @@ async def get_top_products_by_gender(
             raise HTTPException(status_code=400, detail=f"Gender filter must be 'men' or 'women'")
         
         config = get_data_config(base_week)
-        top_products_data = calculate_top_products_by_gender_for_weeks(base_week, num_weeks, config.data_root, gender_filter, top_n)
+        top_products_data = calculate_top_products_by_gender_for_weeks(config.week, num_weeks, config.data_root, gender_filter, top_n)
         
         # Format response
         response = TopProductsResponse(
@@ -2028,7 +2053,7 @@ async def get_sessions_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        sessions_data = calculate_sessions_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        sessions_data = calculate_sessions_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = SessionsPerCountryResponse(
@@ -2065,7 +2090,7 @@ async def get_conversion_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        conversion_data = calculate_conversion_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        conversion_data = calculate_conversion_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = ConversionPerCountryResponse(
@@ -2102,7 +2127,7 @@ async def get_new_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        new_customers_data = calculate_new_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        new_customers_data = calculate_new_customers_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = NewCustomersPerCountryResponse(
@@ -2139,7 +2164,7 @@ async def get_returning_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        returning_customers_data = calculate_returning_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        returning_customers_data = calculate_returning_customers_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = ReturningCustomersPerCountryResponse(
@@ -2176,7 +2201,7 @@ async def get_aov_new_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        aov_data = calculate_aov_new_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        aov_data = calculate_aov_new_customers_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = AOVNewCustomersPerCountryResponse(
@@ -2213,7 +2238,7 @@ async def get_aov_returning_customers_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        aov_data = calculate_aov_returning_customers_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        aov_data = calculate_aov_returning_customers_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = AOVReturningCustomersPerCountryResponse(
@@ -2250,7 +2275,7 @@ async def get_marketing_spend_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        spend_data = calculate_marketing_spend_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        spend_data = calculate_marketing_spend_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = MarketingSpendPerCountryResponse(
@@ -2287,7 +2312,7 @@ async def get_ncac_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        ncac_data = calculate_ncac_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        ncac_data = calculate_ncac_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = nCACPerCountryResponse(
@@ -2324,7 +2349,7 @@ async def get_contribution_new_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        contribution_data = calculate_contribution_new_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        contribution_data = calculate_contribution_new_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionNewPerCountryResponse(
@@ -2361,7 +2386,7 @@ async def get_contribution_new_total_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        contribution_data = calculate_contribution_new_total_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        contribution_data = calculate_contribution_new_total_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionNewTotalPerCountryResponse(
@@ -2398,7 +2423,7 @@ async def get_contribution_returning_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        contribution_data = calculate_contribution_returning_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        contribution_data = calculate_contribution_returning_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionReturningPerCountryResponse(
@@ -2435,7 +2460,7 @@ async def get_contribution_returning_total_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        contribution_data = calculate_contribution_returning_total_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        contribution_data = calculate_contribution_returning_total_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = ContributionReturningTotalPerCountryResponse(
@@ -2472,7 +2497,7 @@ async def get_total_contribution_per_country(
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
         config = get_data_config(base_week)
-        contribution_data = calculate_total_contribution_per_country_for_weeks(base_week, num_weeks, config.data_root)
+        contribution_data = calculate_total_contribution_per_country_for_weeks(config.week, num_weeks, config.data_root)
         
         # Format response
         response = TotalContributionPerCountryResponse(
@@ -2508,6 +2533,7 @@ async def get_batch_all_metrics(
         if num_weeks < 1 or num_weeks > 52:
             raise HTTPException(status_code=400, detail=f"Number of weeks must be between 1 and 52")
         
+        supabase = None
         # Try to read from Supabase first
         try:
             from weekly_report.src.adapters.supabase_client import get_supabase_client
@@ -2549,10 +2575,23 @@ async def get_batch_all_metrics(
         except ImportError:
             logger.debug("Supabase client not available, skipping cache check")
         
-        # Fallback: Compute metrics
+        # Alias fallback: if base_week uses another week's data and that week is in Supabase, return it (no files needed)
+        source_week = resolve_data_week(base_week)
+        if source_week != base_week and supabase:
+            try:
+                alt = supabase.table("weekly_report_metrics").select("*").eq("base_week", source_week).limit(1).execute()
+                if alt.data and len(alt.data) > 0 and alt.data[0].get("num_weeks") == num_weeks:
+                    logger.info(f"✅ Returning cached metrics from Supabase for {base_week} (alias → {source_week})")
+                    metrics_dict = reconstruct_metrics_from_supabase(alt.data[0])
+                    response = BatchMetricsResponse(**metrics_dict)
+                    return response
+            except Exception as alias_err:
+                logger.debug(f"Alias Supabase fallback: {alias_err}")
+        
+        # Fallback: Compute metrics (use data_week path so alias works when files exist)
         config = get_data_config(base_week)
-        logger.info(f"Computing batch metrics for {base_week} with {num_weeks} weeks")
-        all_metrics = calculate_all_metrics(base_week, config.data_root, num_weeks)
+        logger.info(f"Computing batch metrics for {base_week} (data from {config.week}) with {num_weeks} weeks")
+        all_metrics = calculate_all_metrics(config.week, config.data_root, num_weeks)
         
         # Save to Supabase for future use (async, don't block)
         try:
